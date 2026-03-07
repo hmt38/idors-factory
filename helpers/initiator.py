@@ -82,8 +82,13 @@ class Initiator():
         self._extender._callbacks.customizeUiComponent(self._extender.filtersTabs)
 
     def print_welcome_message(self):
-        print("""Thank you for installing Autorize v{} extension
-Created by Barak Tawily
-Contributors: {}
+        print("""
+Welcome to IDORs Factory (越权工厂) v{}
+Based on secondary development of Autorize
+Designed by Thai
 
-Github:\nhttps://github.com/Quitten/Autorize""".format(self._extender.version, ", ".join(self.contributors)))
+This tool integrates intelligent parameter extraction, fuzzing, and LLM-based analysis 
+to detect IDOR vulnerabilities more effectively.
+
+Enjoy your testing!
+""".format(self._extender.version))

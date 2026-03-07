@@ -7,6 +7,7 @@ try:
     from urllib import unquote
 except ImportError:
     from urllib.parse import unquote
+from helpers.llm_helper import LLMHelper
 
 class ParameterExtractor:
     def __init__(self, db_manager):
@@ -24,6 +25,28 @@ class ParameterExtractor:
         
         if not rows:
             return
+
+        # Initialize LLM Helper if enabled
+        extender = getattr(self.db_manager, 'extender', None)
+        llm_helper = None
+        if extender:
+            try:
+                if hasattr(extender, 'enableLlm'):
+                    if extender.enableLlm.isSelected():
+                        llm_helper = LLMHelper(
+                            extender.llmBaseUrl.getText(),
+                            extender.llmApiKey.getText(),
+                            extender.llmModel.getText()
+                        )
+                        print("[Extractor] LLM Helper initialized successfully.")
+                    else:
+                        print("[Extractor] LLM Analysis is DISABLED in configuration.")
+                else:
+                    print("[Extractor] Error: extender has no enableLlm attribute.")
+            except Exception as e_init:
+                print("[Extractor] Error initializing LLM Helper: " + str(e_init))
+        else:
+             print("[Extractor] Warning: extender reference not found in db_manager.")
 
         # Step 2: Process data without holding an open cursor to the table we are reading from
         for row in rows:
@@ -58,6 +81,41 @@ class ParameterExtractor:
                 
                 # 3. Extract Path Params (Heuristic: Numeric IDs or UUIDs)
                 self._extract_path_params(api_signature, path, user_identifier, req_id)
+
+                # LLM Extraction
+                if llm_helper:
+                    req_data_for_llm = {
+                        "method": method,
+                        "path": path,
+                        "query": query_params_json,
+                        "body": body
+                    }
+                    
+                    # A. Assist Parameter Extraction
+                    if extender.llmExtractParams.isSelected():
+                        try:
+                            print("[Extractor] Running LLM Parameter Extraction for Req ID " + str(req_id))
+                            llm_params = llm_helper.extract_params(req_data_for_llm)
+                            for p in llm_params:
+                                # Ensure correct arg order: api_sig, name, value, location, user, req_id
+                                self._save_param(api_signature, p['name'], p['value'], "LLM_" + p['type'], user_identifier, req_id)
+                        except Exception as e_llm_ex:
+                            print("[Extractor] LLM Extraction Error: " + str(e_llm_ex))
+                            import traceback
+                            traceback.print_exc()
+
+                    # B. Generate Parameter Values (Fuzzing)
+                    if extender.llmGenerateValues.isSelected():
+                        try:
+                            print("[Extractor] Running LLM Value Generation for Req ID " + str(req_id))
+                            fuzzed_values = llm_helper.generate_values(req_data_for_llm, [])
+                            for fv in fuzzed_values:
+                                # Save with special user "LLM-Fuzzer"
+                                self._save_param(api_signature, fv['name'], fv['value'], "LLM_Gen", "LLM-Fuzzer", req_id)
+                        except Exception as e_llm_gen:
+                             print("[Extractor] LLM Generation Error: " + str(e_llm_gen))
+                             import traceback
+                             traceback.print_exc()
 
                 # Mark as analyzed with timestamp
                 self.db_manager.execute_query(

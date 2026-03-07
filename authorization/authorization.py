@@ -304,6 +304,17 @@ def identify_and_save_traffic(self, messageInfo):
             reqBodyBytes = messageInfo.getRequest()[reqInfo.getBodyOffset():]
             body = self._helpers.bytesToString(reqBodyBytes)
             
+            # Response Data (New)
+            response_headers = None
+            response_body = None
+            if messageInfo.getResponse():
+                resInfo = self._helpers.analyzeResponse(messageInfo.getResponse())
+                res_headers_list = list(resInfo.getHeaders())
+                response_headers = json.dumps(res_headers_list)
+                
+                resBodyBytes = messageInfo.getResponse()[resInfo.getBodyOffset():]
+                response_body = self._helpers.bytesToString(resBodyBytes)
+
             # Query Params
             query_params = {}
             parameters = reqInfo.getParameters()
@@ -325,7 +336,7 @@ def identify_and_save_traffic(self, messageInfo):
             # or just store "User 1", "User 2". Let's store "User 1", "User 2" for now as it's more flexible.
             
             save_result = self.db_manager.save_raw_request(
-                method, host, url, path, headers, query_params, body, user_identifier
+                method, host, url, path, headers, query_params, body, user_identifier, response_headers, response_body
             )
             
             if save_result:

@@ -13,7 +13,7 @@ class BurpExtender(IBurpExtender, IHttpListener, IProxyListener, IExtensionState
         self._callbacks = callbacks
         self._helpers = callbacks.getHelpers()
         
-        callbacks.setExtensionName("Autorize")
+        callbacks.setExtensionName("IDORs Factory")
         
         self.executor = Executors.newFixedThreadPool(10)
         # Separate scheduler for background tasks like extraction
@@ -42,6 +42,7 @@ class BurpExtender(IBurpExtender, IHttpListener, IProxyListener, IExtensionState
         try:
             from db.database import DatabaseManager
             self.db_manager = DatabaseManager()
+            self.db_manager.extender = self  # Link extender to db_manager
             print("DatabaseManager initialized successfully.")
             
             # Initialize Extractor

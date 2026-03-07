@@ -4,11 +4,29 @@
 import json
 import time
 
+from helpers.llm_helper import LLMHelper
+
 class AttackEngine:
     def __init__(self, db_manager):
         self.db_manager = db_manager
+        self.llm_helper = None
+
+    def _init_llm(self):
+        try:
+            extender = self.db_manager.extender
+            if extender and extender.enableLlm.isSelected():
+                self.llm_helper = LLMHelper(
+                    extender.llmBaseUrl.getText(),
+                    extender.llmApiKey.getText(),
+                    extender.llmModel.getText()
+                )
+            else:
+                self.llm_helper = None
+        except:
+            self.llm_helper = None
 
     def generate_attacks(self):
+        self._init_llm()
         """
         Scan for requests from User A (or any user) that haven't been attacked yet,
         find matching parameters from other users (User B), and generate attack payloads.
@@ -44,7 +62,7 @@ class AttackEngine:
         FROM raw_requests r 
         WHERE r.is_analyzed = 1 
         AND r.id NOT IN (SELECT original_request_id FROM attack_queue)
-        LIMIT 20
+        LIMIT 200
         '''
         
         requests = self.db_manager.fetch_all(sql)
@@ -53,11 +71,36 @@ class AttackEngine:
             print("[Attacker] No new requests to generate attacks for.")
             return
 
+        print("[Attacker] Processing {} potential requests...".format(len(requests)))
+        
+        # Access progress bar if available
+        extender = getattr(self.db_manager, 'extender', None)
+        progressBar = getattr(extender, 'progressBar', None)
+        from javax.swing import SwingUtilities
+        
+        count = 0
+        total = len(requests)
+        
         for req in requests:
+            count += 1
+            req_id = req[0]
+            
+            # Update progress
+            if progressBar:
+                def update_progress(c=count, t=total, rid=req_id):
+                    progressBar.setString("Processing {}/{} (Req ID {})...".format(c, t, rid))
+                SwingUtilities.invokeLater(update_progress)
+                
             try:
                 self._process_request(req)
             except Exception as e:
-                print("[Attacker] Error processing request {}: {}".format(req[0], str(e)))
+                print("[Attacker] Error processing request {}: {}".format(req_id, str(e)))
+                import traceback
+                traceback.print_exc()
+            
+            # print("[Attacker] Finished processing Request ID: " + str(req_id))
+            
+        print("[Attacker] Attack generation scan complete.")
 
     def _update_risk_scores_based_on_exclusivity(self):
         """
@@ -123,6 +166,20 @@ class AttackEngine:
         
         # 1. Identify API Signature
         api_signature = self._generate_api_signature(method, host, path)
+        try:
+             if self.db_manager.extender:
+                 api_signature = self.db_manager.extender.extractor._get_api_signature(method, path)
+        except:
+             pass
+
+        # Identify API Risk (if enabled)
+        try:
+            if self.llm_helper and self.db_manager.extender.llmIdentifyRisk.isSelected():
+                print("[Attacker] Calling LLM Identify Risk for " + api_signature)
+                self._identify_api_risk(api_signature, req)
+                print("[Attacker] LLM Identify Risk finished for " + api_signature)
+        except Exception as e_llm:
+            print("[Attacker] Error in API Risk ID: " + str(e_llm))
         
         # 2. Extract parameters from current request
         current_params = self._extract_params_from_request(path, query_params_json, body)
@@ -164,28 +221,46 @@ class AttackEngine:
         # But maybe they only have values for some.
         
         sql_users = "SELECT DISTINCT user_identifier FROM parameter_pool WHERE api_signature = ? AND user_identifier != ?"
-        other_users = self.db_manager.fetch_all(sql_users, (api_signature, user_identifier))
+        try:
+            other_users = self.db_manager.fetch_all(sql_users, (api_signature, user_identifier))
+        except Exception as e_db:
+             print("[Attacker] Error fetching other users: " + str(e_db))
+             return
         
+        if not other_users:
+            # Fallback: if user_identifier is "User 1", try finding "User 2" specifically even if API sig doesn't match perfectly?
+            # Or maybe api_signature is too strict?
+            # Try finding ANY other user in the system to see if we have cross-user data at all.
+            # But for now, just log.
+            # print("[Attacker] No other users found for API: " + api_signature)
+            return
+
         for user_row in other_users:
             other_user = user_row[0]
             print("[Attacker] Generating permutations for Target User: " + str(other_user))
             
             # Fetch all params for this other user on this API
             sql_other_params = "SELECT param_name, param_value FROM parameter_pool WHERE api_signature = ? AND user_identifier = ?"
-            other_param_rows = self.db_manager.fetch_all(sql_other_params, (api_signature, other_user))
+            other_param_rows = []
+            try:
+                other_param_rows = self.db_manager.fetch_all(sql_other_params, (api_signature, other_user))
+            except Exception as e_p:
+                 print("[Attacker] Error fetching other user params: " + str(e_p))
+                 continue
             
             # Convert to dictionary for easy lookup
             other_params_map = {row[0]: row[1] for row in other_param_rows}
             
             # Identify which parameters can be swapped
-            # We only swap if the other user has a DIFFERENT value for the same parameter name.
             swappable_params = []
             for tp in target_params:
                 p_name = tp["name"]
                 p_val = tp["value"]
                 if p_name in other_params_map:
                     other_val = other_params_map[p_name]
-                    if other_val != p_val:
+                    # Log comparison
+                    # print("[Attacker] Comparing param {}: My val={}, Other val={}".format(p_name, p_val, other_val))
+                    if str(other_val) != str(p_val):
                         # Found a difference!
                         swappable_params.append({
                             "name": p_name,
@@ -196,9 +271,10 @@ class AttackEngine:
                         })
             
             if not swappable_params:
+                # print("[Attacker] No swappable params found for User: " + str(other_user))
                 continue
                 
-            # 4. Generate Permutations
+            print("[Attacker] Found {} swappable params for User {}".format(len(swappable_params), other_user))
             # We need to generate combinations:
             # - Single parameter replacement (for each swappable param)
             # - All parameters replacement
@@ -307,8 +383,11 @@ class AttackEngine:
         VALUES (?, ?, ?, ?, ?, ?)
         '''
         
-        self.db_manager.execute_query(sql, (req_id, target_user, description, json.dumps(request_data), "PENDING", risk_score))
-        print("[Attacker] Queued attack: " + description)
+        try:
+            self.db_manager.execute_query(sql, (req_id, target_user, description, json.dumps(request_data), "PENDING", risk_score))
+            print("[Attacker] Queued attack: " + description)
+        except Exception as e_ins:
+             print("[Attacker] Error inserting attack: " + str(e_ins))
 
 
     def _update_json_value(self, json_obj, key_path, new_value):
@@ -370,6 +449,34 @@ class AttackEngine:
                 self._flatten_json(item, params, prefix + str(i) + ".")
         else:
             params.append((prefix.rstrip("."), str(json_obj), "BODY_JSON"))
+
+    def _identify_api_risk(self, api_signature, req_data):
+        # req_data is tuple: (id, method, host, url, path, headers, query, body, user)
+        # Check if already analyzed
+        rows = self.db_manager.fetch_all("SELECT 1 FROM api_metadata WHERE api_signature = ?", (api_signature,))
+        if rows:
+            return
+
+        print("[Attacker] Analyzing API Risk for: " + api_signature)
+        req_obj = {
+            "method": req_data[1],
+            "path": req_data[4],
+            "query": req_data[6],
+            "body": req_data[7]
+        }
+        
+        try:
+            result = self.llm_helper.identify_sensitive_api(req_obj)
+            is_sensitive = 1 if result['is_sensitive'] else 0
+            reason = result['reason']
+            
+            self.db_manager.execute_query(
+                "INSERT OR REPLACE INTO api_metadata (api_signature, is_sensitive, risk_reason) VALUES (?, ?, ?)",
+                (api_signature, is_sensitive, reason)
+            )
+            print("[Attacker] API Risk Analyzed: Sensitive={}, Reason={}".format(is_sensitive, reason))
+        except Exception as e:
+            print("[Attacker] Error identifying API risk: " + str(e))
 
     def _generate_api_signature(self, method, host, path):
         # Same heuristic as extractor
@@ -465,6 +572,9 @@ class AttackEngine:
             
         request_data_json, original_req_id = rows[0]
         request_data = json.loads(request_data_json)
+        
+        # Verify Attack ID in request_data if possible, or just trust the DB row
+        print("[Attacker] Executing Attack ID: {} (Original Request ID: {})".format(attack_id, original_req_id))
         
         # 2. Reconstruct Request (Correctly updating Request Line)
         new_request_bytes = self.reconstruct_request(request_data, helpers)

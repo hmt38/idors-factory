@@ -10,8 +10,8 @@ from javax.swing import GroupLayout
 from javax.swing import JSplitPane
 from javax.swing import JCheckBox
 from javax.swing import JButton
-from javax.swing import JPanel
-from java.awt import Dimension
+from javax.swing import JPanel, JProgressBar
+from java.awt import Dimension, BorderLayout
 
 from table import UpdateTableEDT
 
@@ -41,8 +41,28 @@ class RunExtractorRunnable(Runnable):
     def run(self):
         if hasattr(self._extender, 'extractor') and self._extender.extractor:
             print("Manually running Parameter Extractor...")
-            self._extender.extractor.process_unanalyzed_requests()
-            print("Parameter extraction complete.")
+            
+            # Show progress
+            if hasattr(self._extender, 'progressBar'):
+                SwingUtilities.invokeLater(lambda: self._extender.progressBar.setIndeterminate(True))
+                SwingUtilities.invokeLater(lambda: self._extender.progressBar.setString("Extracting Parameters..."))
+                SwingUtilities.invokeLater(lambda: self._extender.progressBar.setStringPainted(True))
+            
+            try:
+                self._extender.extractor.process_unanalyzed_requests()
+                print("Parameter extraction complete.")
+            finally:
+                if hasattr(self._extender, 'progressBar'):
+                    SwingUtilities.invokeLater(lambda: self._extender.progressBar.setIndeterminate(False))
+                    SwingUtilities.invokeLater(lambda: self._extender.progressBar.setString("Extraction Complete"))
+                    # Reset after 2 seconds
+                    def reset():
+                         import time
+                         time.sleep(2)
+                         if hasattr(self._extender, 'progressBar'):
+                            SwingUtilities.invokeLater(lambda: self._extender.progressBar.setString(""))
+                            SwingUtilities.invokeLater(lambda: self._extender.progressBar.setStringPainted(False))
+                    # We can't easily spawn a thread here without causing issues, so just leave it "Complete"
         else:
             print("Extractor not initialized.")
 
@@ -53,8 +73,19 @@ class RunAttackerRunnable(Runnable):
     def run(self):
         if hasattr(self._extender, 'attack_engine') and self._extender.attack_engine:
             print("Manually running Attack Engine...")
-            self._extender.attack_engine.generate_attacks()
-            print("Attack generation complete.")
+            
+            if hasattr(self._extender, 'progressBar'):
+                SwingUtilities.invokeLater(lambda: self._extender.progressBar.setIndeterminate(True))
+                SwingUtilities.invokeLater(lambda: self._extender.progressBar.setString("Generating Attacks..."))
+                SwingUtilities.invokeLater(lambda: self._extender.progressBar.setStringPainted(True))
+                
+            try:
+                self._extender.attack_engine.generate_attacks()
+                print("Attack generation complete.")
+            finally:
+                if hasattr(self._extender, 'progressBar'):
+                    SwingUtilities.invokeLater(lambda: self._extender.progressBar.setIndeterminate(False))
+                    SwingUtilities.invokeLater(lambda: self._extender.progressBar.setString("Generation Complete"))
         else:
             print("Attack Engine not initialized.")
 
@@ -71,6 +102,60 @@ class ClearDatabaseRunnable(Runnable):
                 print("Failed to clear database.")
         else:
             print("Database manager not initialized.")
+
+class TestLLMRunnable(Runnable):
+    def __init__(self, extender):
+        self._extender = extender
+
+    def run(self):
+        try:
+            print("Testing LLM Connection...")
+            if hasattr(self._extender, 'progressBar'):
+                SwingUtilities.invokeLater(lambda: self._extender.progressBar.setIndeterminate(True))
+                SwingUtilities.invokeLater(lambda: self._extender.progressBar.setString("Testing LLM..."))
+                SwingUtilities.invokeLater(lambda: self._extender.progressBar.setStringPainted(True))
+            
+            from helpers.llm_helper import LLMHelper
+            llm = LLMHelper(
+                self._extender.llmBaseUrl.getText(),
+                self._extender.llmApiKey.getText(),
+                self._extender.llmModel.getText()
+            )
+            
+            # Simple test prompt
+            try:
+                # We use a very simple prompt to minimize cost and time
+                response = llm._call_llm("Say 'OK'")
+                print("[LLM Test] Response: " + str(response))
+                
+                if 'choices' in response:
+                    content = response['choices'][0]['message']['content']
+                    msg = "Success: " + content
+                else:
+                    msg = "Failed: Invalid response format"
+            except Exception as e:
+                msg = "Failed: " + str(e)
+                print("[LLM Test] Error: " + str(e))
+                
+            if hasattr(self._extender, 'progressBar'):
+                SwingUtilities.invokeLater(lambda: self._extender.progressBar.setIndeterminate(False))
+                SwingUtilities.invokeLater(lambda: self._extender.progressBar.setString(msg))
+                
+                # Reset after 3 seconds
+                def reset():
+                     import time
+                     time.sleep(3)
+                     if hasattr(self._extender, 'progressBar'):
+                        SwingUtilities.invokeLater(lambda: self._extender.progressBar.setString(""))
+                        SwingUtilities.invokeLater(lambda: self._extender.progressBar.setStringPainted(False))
+                
+                # We can't easily spawn a thread here without causing issues, so just leave it
+                
+        except Exception as e_main:
+             print("[LLM Test] Critical Error: " + str(e_main))
+             if hasattr(self._extender, 'progressBar'):
+                SwingUtilities.invokeLater(lambda: self._extender.progressBar.setIndeterminate(False))
+                SwingUtilities.invokeLater(lambda: self._extender.progressBar.setString("Error: " + str(e_main)))
 
 class ConfigurationTab():
     def __init__(self, extender):
@@ -108,8 +193,26 @@ class ConfigurationTab():
         self._extender.llmModelLabel = JLabel("Model:")
         self._extender.llmModel = JTextField("gpt-3.5-turbo", 10)
         
+        self._extender.testLlmButton = JButton("Test LLM", actionPerformed=self.testLlm)
+        self._extender.testLlmButton.setToolTipText("Test connection to LLM API")
+        
         self._extender.enableLlm = JCheckBox("Enable LLM Analysis")
         self._extender.enableLlm.setSelected(False)
+        
+        # LLM Sub-features
+        self._extender.llmExtractParams = JCheckBox("Assist Param Extraction")
+        self._extender.llmExtractParams.setSelected(True)
+        self._extender.llmGenerateValues = JCheckBox("Generate Param Values")
+        self._extender.llmGenerateValues.setSelected(True)
+        self._extender.llmIdentifyRisk = JCheckBox("Identify High-Risk APIs")
+        self._extender.llmIdentifyRisk.setSelected(True)
+        self._extender.llmAnalyzeResult = JCheckBox("Analyze Attack Results")
+        self._extender.llmAnalyzeResult.setSelected(True)
+        
+        # Progress Bar
+        self._extender.progressBar = JProgressBar()
+        self._extender.progressBar.setStringPainted(False)
+        self._extender.progressBar.setBounds(10, 240, 250, 20)
 
         self._extender.autoScroll = JCheckBox("Auto scroll")
         self._extender.autoScroll.setBounds(145, 80, 130, 30)
@@ -195,8 +298,18 @@ class ConfigurationTab():
                     .addGroup(layout.createSequentialGroup()
                         .addComponent(self._extender.llmModelLabel)
                         .addComponent(self._extender.llmModel, GroupLayout.PREFERRED_SIZE, GroupLayout.PREFERRED_SIZE, GroupLayout.PREFERRED_SIZE)
+                        .addComponent(self._extender.testLlmButton, GroupLayout.PREFERRED_SIZE, GroupLayout.PREFERRED_SIZE, GroupLayout.PREFERRED_SIZE)
                         .addComponent(self._extender.enableLlm, GroupLayout.PREFERRED_SIZE, GroupLayout.PREFERRED_SIZE, GroupLayout.PREFERRED_SIZE)
                     )
+                    .addGroup(layout.createSequentialGroup()
+                        .addComponent(self._extender.llmExtractParams)
+                        .addComponent(self._extender.llmGenerateValues)
+                    )
+                    .addGroup(layout.createSequentialGroup()
+                        .addComponent(self._extender.llmIdentifyRisk)
+                        .addComponent(self._extender.llmAnalyzeResult)
+                    )
+                    .addComponent(self._extender.progressBar, GroupLayout.PREFERRED_SIZE, 250, GroupLayout.PREFERRED_SIZE)
                     )
                 .addGroup(
                     layout.createParallelGroup()
@@ -321,8 +434,18 @@ class ConfigurationTab():
                     .addGroup(layout.createParallelGroup(GroupLayout.Alignment.BASELINE)
                         .addComponent(self._extender.llmModelLabel)
                         .addComponent(self._extender.llmModel, GroupLayout.PREFERRED_SIZE, GroupLayout.PREFERRED_SIZE, GroupLayout.PREFERRED_SIZE)
+                        .addComponent(self._extender.testLlmButton, GroupLayout.PREFERRED_SIZE, GroupLayout.PREFERRED_SIZE, GroupLayout.PREFERRED_SIZE)
                         .addComponent(self._extender.enableLlm, GroupLayout.PREFERRED_SIZE, GroupLayout.PREFERRED_SIZE, GroupLayout.PREFERRED_SIZE)
                     )
+                    .addGroup(layout.createParallelGroup(GroupLayout.Alignment.BASELINE)
+                        .addComponent(self._extender.llmExtractParams)
+                        .addComponent(self._extender.llmGenerateValues)
+                    )
+                    .addGroup(layout.createParallelGroup(GroupLayout.Alignment.BASELINE)
+                        .addComponent(self._extender.llmIdentifyRisk)
+                        .addComponent(self._extender.llmAnalyzeResult)
+                    )
+                    .addComponent(self._extender.progressBar, GroupLayout.PREFERRED_SIZE, GroupLayout.PREFERRED_SIZE, GroupLayout.PREFERRED_SIZE)
                     .addComponent(
                             self._extender.autoScroll,
                             GroupLayout.PREFERRED_SIZE,
@@ -360,6 +483,9 @@ class ConfigurationTab():
 
     def generateAttacks(self, event):
         self._extender.executor.submit(RunAttackerRunnable(self._extender))
+
+    def testLlm(self, event):
+        self._extender.executor.submit(TestLLMRunnable(self._extender))
     
     def replaceQueryHanlder(self, event):
         default_text = "Cookie: Insert=injected; cookie=or;\nHeader: here"

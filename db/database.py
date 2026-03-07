@@ -170,12 +170,47 @@ class DatabaseManager:
             if not conn:
                 return []
             cursor = conn.cursor()
-            if params:
-                cursor.execute(query, params)
+            
+            # zxJDBC specific execution
+            if USE_ZXJDBC:
+                if params:
+                    cursor.execute(query, params)
+                else:
+                    cursor.execute(query)
+                
+                # Some zxJDBC drivers (like sqlite-jdbc wrapper) might fail on fetchall
+                try:
+                    return cursor.fetchall()
+                except:
+                    # Fallback iteration
+                    results = []
+                    for row in cursor:
+                        results.append(row)
+                    return results
             else:
-                cursor.execute(query)
-            return cursor.fetchall()
+                # Standard sqlite3
+                if params:
+                    cursor.execute(query, params)
+                else:
+                    cursor.execute(query)
+                return cursor.fetchall()
+                
         except Exception as e:
+            # Handle specific zxJDBC "not implemented" error if fetchall fails
+            # Also catch "JavaException" which might wrap the underlying SQL error
+            error_str = str(e).lower()
+            if "not implemented" in error_str or "java" in error_str:
+                try:
+                    # Fallback for drivers that don't support fetchall fully or correctly
+                    results = []
+                    # zxJDBC cursor is an iterator
+                    for row in cursor:
+                        results.append(row)
+                    return results
+                except Exception as e2:
+                    print("[DB] Error fetching data (fallback): " + str(e2))
+                    return []
+            
             print("[DB] Error fetching data: " + str(e))
             return []
         finally:
@@ -200,7 +235,7 @@ class DatabaseManager:
                     pass
                 
                 # 1. raw_requests table
-                cursor.execute("CREATE TABLE IF NOT EXISTS raw_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, method TEXT, host TEXT, url TEXT, path TEXT, headers TEXT, query_params TEXT, body BLOB, user_identifier TEXT, is_analyzed BOOLEAN DEFAULT 0, analyzed_at DATETIME)")
+                cursor.execute("CREATE TABLE IF NOT EXISTS raw_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, method TEXT, host TEXT, url TEXT, path TEXT, headers TEXT, query_params TEXT, body BLOB, user_identifier TEXT, is_analyzed BOOLEAN DEFAULT 0, analyzed_at DATETIME, response_headers TEXT, response_body BLOB)")
                 
                 # Check if analyzed_at column exists (for upgrade)
                 try:
@@ -213,6 +248,19 @@ class DatabaseManager:
                         print("Added analyzed_at column to raw_requests")
                     except Exception as e:
                         print("Failed to add analyzed_at column: " + str(e))
+
+                # Check if response_headers/response_body columns exist (for upgrade)
+                try:
+                    cursor.execute("SELECT response_headers, response_body FROM raw_requests LIMIT 1")
+                except:
+                    try:
+                        cursor.execute("ALTER TABLE raw_requests ADD COLUMN response_headers TEXT")
+                    except: pass
+                    try:
+                        cursor.execute("ALTER TABLE raw_requests ADD COLUMN response_body BLOB")
+                    except: pass
+                    conn.commit()
+                    print("Added response columns to raw_requests")
                 
                 # 2. parameter_pool table
                 cursor.execute("CREATE TABLE IF NOT EXISTS parameter_pool (id INTEGER PRIMARY KEY AUTOINCREMENT, api_signature TEXT, param_name TEXT, param_value TEXT, location TEXT, user_identifier TEXT, risk_score INTEGER DEFAULT 0, llm_analysis_result TEXT, UNIQUE(api_signature, param_name, user_identifier))")
@@ -252,6 +300,9 @@ class DatabaseManager:
                     conn.commit()
                     print("Added new columns to attack_queue")
                 
+                # 4. api_metadata table (For LLM risk analysis)
+                cursor.execute("CREATE TABLE IF NOT EXISTS api_metadata (api_signature TEXT PRIMARY KEY, is_sensitive BOOLEAN, risk_reason TEXT, analyzed_at DATETIME DEFAULT CURRENT_TIMESTAMP)")
+
                 conn.commit()
                 print("Database initialized successfully at " + self.db_path)
                 
@@ -261,13 +312,13 @@ class DatabaseManager:
             print("Error initializing database: " + str(e))
             traceback.print_exc()
 
-    def save_raw_request(self, method, host, url, path, headers, query_params, body, user_identifier):
+    def save_raw_request(self, method, host, url, path, headers, query_params, body, user_identifier, response_headers=None, response_body=None):
         # Prepare params
         headers_json = json.dumps(headers)
         query_json = json.dumps(query_params)
         
-        sql = "INSERT INTO raw_requests (method, host, url, path, headers, query_params, body, user_identifier) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-        params = [method, host, url, path, headers_json, query_json, body, user_identifier]
+        sql = "INSERT INTO raw_requests (method, host, url, path, headers, query_params, body, user_identifier, response_headers, response_body) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        params = [method, host, url, path, headers_json, query_json, body, user_identifier, response_headers, response_body]
         
         return self.execute_query(sql, params)
 
