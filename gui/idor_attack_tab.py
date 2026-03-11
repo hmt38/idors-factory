@@ -13,6 +13,8 @@ from javax.swing import (
     ListSelectionModel,
     SwingUtilities,
     JTextArea,
+    JPopupMenu,
+    JMenuItem,
 )
 from javax.swing.table import (
     AbstractTableModel,
@@ -20,7 +22,7 @@ from javax.swing.table import (
     TableRowSorter,
 )
 from java.awt import BorderLayout, FlowLayout, Color, Dimension, Font
-from java.awt.event import ActionListener
+from java.awt.event import ActionListener, MouseAdapter
 from burp import IMessageEditorController
 import json
 from java.util import ArrayList
@@ -104,14 +106,30 @@ class RiskRenderer(DefaultTableCellRenderer):
             fg_color = Color.BLACK
             bg_color = table.getBackground()
 
-            # 1. Check for Status (Column 3) specific coloring
-            status = model.getValueAt(model_row, 3)
-            if status == "VULNERABLE":
-                bg_color = Color(255, 200, 200)  # Light Red
-            elif status == "SAFE":
-                bg_color = Color(200, 255, 200)  # Light Green
-            elif status == "SENT":
-                bg_color = Color(255, 255, 200)  # Light Yellow
+            # Check if verified (deep green background)
+            attack_id = model.getValueAt(model_row, 0)
+            is_verified = False
+            if self.extender and hasattr(self.extender, "db_manager"):
+                try:
+                    rows = self.extender.db_manager.fetch_all(
+                        "SELECT verified FROM attack_queue WHERE id = ?", (attack_id,)
+                    )
+                    if rows and rows[0][0]:
+                        is_verified = True
+                        bg_color = Color(0, 150, 0)  # Deep Green for verified
+                        fg_color = Color.WHITE
+                except:
+                    pass
+
+            # 1. Check for Status (Column 3) specific coloring (only if not verified)
+            if not is_verified:
+                status = model.getValueAt(model_row, 3)
+                if status == "VULNERABLE":
+                    bg_color = Color(255, 200, 200)  # Light Red
+                elif status == "SAFE":
+                    bg_color = Color(200, 255, 200)  # Light Green
+                elif status == "SENT":
+                    bg_color = Color(255, 255, 200)  # Light Yellow
 
             # 2. Check for Sensitive API (Risk)
             method = model.getValueAt(model_row, 1)
@@ -262,6 +280,9 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
         # Set Tooltip for Description Column (Index 7)
         # Note: RiskRenderer needs to handle tooltip.
 
+        # Add right-click menu
+        self.setup_context_menu()
+
         self.scroll_pane = JScrollPane(self.table)
         self.split_pane.setLeftComponent(self.scroll_pane)
 
@@ -314,20 +335,78 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
         self.split_pane.setDividerLocation(600)
         self.details_split_pane.setDividerLocation(300)
 
-    def refresh_table(self, event=None):
-        # Fetch attacks from DB
-        # We need to join with raw_requests to get method/path if not stored in attack_queue (wait, attack_queue has request_data json)
-        # But for the table, we want to display Method/Path.
-        # attack_queue: request_data BLOB. We can parse it, but it's slow for list.
-        # Actually raw_requests has method/path.
-        # query: SELECT a.id, r.method, r.path, a.status, a.response_code, a.vulnerability_score, a.llm_verification_result, a.payload_description
-        # FROM attack_queue a JOIN raw_requests r ON a.original_request_id = r.id
+    def setup_context_menu(self):
+        """Setup right-click context menu for the table"""
+        popup_menu = JPopupMenu()
 
+        mark_verified_item = JMenuItem("Mark as Verified")
+        mark_verified_item.addActionListener(lambda e: self.mark_as_verified())
+        popup_menu.add(mark_verified_item)
+
+        unmark_verified_item = JMenuItem("Unmark Verified")
+        unmark_verified_item.addActionListener(lambda e: self.unmark_verified())
+        popup_menu.add(unmark_verified_item)
+
+        # Add mouse listener to show popup
+        class PopupListener(MouseAdapter):
+            def __init__(self, panel, popup):
+                self.panel = panel
+                self.popup = popup
+
+            def mousePressed(self, event):
+                self.showPopup(event)
+
+            def mouseReleased(self, event):
+                self.showPopup(event)
+
+            def showPopup(self, event):
+                if event.isPopupTrigger():
+                    row = self.panel.table.rowAtPoint(event.getPoint())
+                    if row >= 0:
+                        self.panel.table.setRowSelectionInterval(row, row)
+                        self.popup.show(
+                            event.getComponent(), event.getX(), event.getY()
+                        )
+
+        self.table.addMouseListener(PopupListener(self, popup_menu))
+
+    def mark_as_verified(self):
+        """Mark selected attack as verified"""
+        selected_row = self.table.getSelectedRow()
+        if selected_row == -1:
+            return
+
+        model_row = self.table.convertRowIndexToModel(selected_row)
+        attack_id = self.table_model.getValueAt(model_row, 0)
+
+        if hasattr(self.extender, "db_manager"):
+            self.extender.db_manager.execute_query(
+                "UPDATE attack_queue SET verified = 1 WHERE id = ?", (attack_id,)
+            )
+            self.refresh_table()
+
+    def unmark_verified(self):
+        """Unmark selected attack as verified"""
+        selected_row = self.table.getSelectedRow()
+        if selected_row == -1:
+            return
+
+        model_row = self.table.convertRowIndexToModel(selected_row)
+        attack_id = self.table_model.getValueAt(model_row, 0)
+
+        if hasattr(self.extender, "db_manager"):
+            self.extender.db_manager.execute_query(
+                "UPDATE attack_queue SET verified = 0 WHERE id = ?", (attack_id,)
+            )
+            self.refresh_table()
+
+    def refresh_table(self, event=None):
+        # Fetch attacks from DB including verified status
         sql = """
         SELECT a.id, r.method, r.path, a.status, a.response_code, a.vulnerability_score, a.llm_verification_result, a.payload_description 
         FROM attack_queue a 
         JOIN raw_requests r ON a.original_request_id = r.id
-        ORDER BY a.id DESC
+        ORDER BY a.verified DESC, a.id DESC
         """
         if hasattr(self.extender, "db_manager"):
             rows = self.extender.db_manager.fetch_all(sql)
@@ -646,14 +725,33 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
                 )
                 print("[IDOR] Data fetched. Orig Req ID: " + str(orig_req_id))
 
-                # Reconstruct request for display
+                # Reconstruct request for display with parameter change annotations
                 try:
                     rd = json.loads(req_data_json)
-                    self.current_request = (
-                        self.extender.attack_engine.reconstruct_request(
-                            rd, self.extender._helpers
-                        )
+
+                    # Get original request data for comparison
+                    sql_orig_data = (
+                        "SELECT path, query_params, body FROM raw_requests WHERE id = ?"
                     )
+                    orig_data_rows = self.extender.db_manager.fetch_all(
+                        sql_orig_data, (orig_req_id,)
+                    )
+
+                    if orig_data_rows:
+                        orig_path, orig_query_json, orig_body = orig_data_rows[0]
+                        # Reconstruct with annotations
+                        self.current_request = (
+                            self._reconstruct_request_with_annotations(
+                                rd, orig_path, orig_query_json, orig_body, description
+                            )
+                        )
+                    else:
+                        # Fallback to normal reconstruction
+                        self.current_request = (
+                            self.extender.attack_engine.reconstruct_request(
+                                rd, self.extender._helpers
+                            )
+                        )
                 except Exception as e:
                     print("[IDOR] Error reconstructing request: " + str(e))
                     self.current_request = None
@@ -709,10 +807,118 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
                             # print("[IDOR] Original Response missing for req ID " + str(orig_req_id))
                             self.current_original_response = None
 
-                        # Update Diff Tab
+                        # Update Diff Tab with detailed parameter changes
                         diff_sb = []
                         diff_sb.append("=== Attack Description ===")
                         diff_sb.append(description)
+
+                        # Parse and display parameter changes in detail
+                        diff_sb.append("\n=== Parameter Changes ===")
+                        try:
+                            # Parse description to extract parameter changes
+                            # Format: "Swap params (N): param1=val1->val2, param2=val3->val4"
+                            if "Swap params" in description and ":" in description:
+                                changes_part = description.split(":", 1)[1].strip()
+                                changes = changes_part.split(", ")
+                                for change in changes:
+                                    if "->" in change:
+                                        param_info = change.strip()
+                                        diff_sb.append("  " + param_info)
+                            else:
+                                diff_sb.append("  " + description)
+                        except:
+                            diff_sb.append("  " + description)
+
+                        # Compare original and attack request data
+                        diff_sb.append("\n=== Request Comparison ===")
+                        try:
+                            rd = json.loads(req_data_json)
+
+                            # Fetch original request data
+                            sql_orig_data = "SELECT path, query_params, body FROM raw_requests WHERE id = ?"
+                            orig_data_rows = self.extender.db_manager.fetch_all(
+                                sql_orig_data, (orig_req_id,)
+                            )
+                            if orig_data_rows:
+                                orig_path, orig_query_json, orig_body = orig_data_rows[
+                                    0
+                                ]
+
+                                # Compare Path
+                                if rd.get("path") != orig_path:
+                                    diff_sb.append("Path:")
+                                    diff_sb.append("  Original: " + str(orig_path))
+                                    diff_sb.append("  Attack:   " + str(rd.get("path")))
+
+                                # Compare Query Parameters
+                                try:
+                                    orig_query = (
+                                        json.loads(orig_query_json)
+                                        if orig_query_json
+                                        else {}
+                                    )
+                                    attack_query = rd.get("query_params", {})
+
+                                    changed_params = []
+                                    for key in set(
+                                        list(orig_query.keys())
+                                        + list(attack_query.keys())
+                                    ):
+                                        orig_val = orig_query.get(key, "")
+                                        attack_val = attack_query.get(key, "")
+                                        if str(orig_val) != str(attack_val):
+                                            changed_params.append(
+                                                "  {}:  {} -> {}".format(
+                                                    key, orig_val, attack_val
+                                                )
+                                            )
+
+                                    if changed_params:
+                                        diff_sb.append("\nQuery Parameters:")
+                                        diff_sb.extend(changed_params)
+                                except:
+                                    pass
+
+                                # Compare Body
+                                try:
+                                    if orig_body and orig_body.strip().startswith("{"):
+                                        orig_body_json = json.loads(orig_body)
+                                        attack_body = rd.get("body", "")
+                                        if (
+                                            attack_body
+                                            and attack_body.strip().startswith("{")
+                                        ):
+                                            attack_body_json = json.loads(attack_body)
+
+                                            # Flatten and compare
+                                            orig_flat = self._flatten_dict(
+                                                orig_body_json
+                                            )
+                                            attack_flat = self._flatten_dict(
+                                                attack_body_json
+                                            )
+
+                                            changed_body_params = []
+                                            for key in set(
+                                                list(orig_flat.keys())
+                                                + list(attack_flat.keys())
+                                            ):
+                                                orig_val = orig_flat.get(key, "")
+                                                attack_val = attack_flat.get(key, "")
+                                                if str(orig_val) != str(attack_val):
+                                                    changed_body_params.append(
+                                                        "  {}:  {} -> {}".format(
+                                                            key, orig_val, attack_val
+                                                        )
+                                                    )
+
+                                            if changed_body_params:
+                                                diff_sb.append("\nBody Parameters:")
+                                                diff_sb.extend(changed_body_params)
+                                except:
+                                    pass
+                        except Exception as e_compare:
+                            print("[IDOR] Error comparing requests: " + str(e_compare))
 
                         # Add LLM Result if available
                         if llm_result_json and llm_result_json != "PENDING":
@@ -841,3 +1047,29 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
 
     def getResponse(self):
         return self.current_response
+
+    def _flatten_dict(self, d, parent_key="", sep="."):
+        """Flatten nested dictionary for comparison"""
+        items = []
+        if isinstance(d, dict):
+            for k, v in d.items():
+                new_key = parent_key + sep + k if parent_key else k
+                if isinstance(v, dict):
+                    items.extend(self._flatten_dict(v, new_key, sep=sep).items())
+                elif isinstance(v, list):
+                    for i, item in enumerate(v):
+                        items.extend(
+                            self._flatten_dict(
+                                item, new_key + sep + str(i), sep=sep
+                            ).items()
+                        )
+                else:
+                    items.append((new_key, v))
+        elif isinstance(d, list):
+            for i, item in enumerate(d):
+                items.extend(
+                    self._flatten_dict(item, parent_key + sep + str(i), sep=sep).items()
+                )
+        else:
+            items.append((parent_key, d))
+        return dict(items)

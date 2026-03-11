@@ -15,6 +15,19 @@ class ParameterExtractor:
     def __init__(self, db_manager):
         self.db_manager = db_manager
 
+    def _is_blacklisted(self, param_name):
+        """Check if parameter is in blacklist"""
+        try:
+            extender = getattr(self.db_manager, "extender", None)
+            if extender and hasattr(extender, "blacklistParams"):
+                blacklist_text = extender.blacklistParams.getText().strip()
+                if blacklist_text:
+                    blacklist = [p.strip() for p in blacklist_text.split(",")]
+                    return param_name in blacklist
+        except:
+            pass
+        return False
+
     def process_unanalyzed_requests(self):
         """
         Fetch unanalyzed requests from raw_requests table, extract parameters,
@@ -273,6 +286,19 @@ class ParameterExtractor:
         # Or save everything to allow full permutation.
         if not value:
             return
+
+        # Check blacklist
+        if self._is_blacklisted(name):
+            return
+
+        # Ensure proper encoding for Chinese characters
+        try:
+            if isinstance(value, str):
+                value = value.decode("utf-8") if hasattr(value, "decode") else value
+            elif not isinstance(value, unicode):
+                value = unicode(str(value), "utf-8", errors="ignore")
+        except:
+            pass
 
         # Calculate Risk Score
         risk_score = self.calculate_risk_score(name, value, location)
