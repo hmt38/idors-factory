@@ -186,8 +186,18 @@ class DatabaseManager:
         conn = None
         cursor = None
         try:
+            # Log query for debugging
+            print(
+                "[DB] Executing query: "
+                + query[:200]
+                + ("..." if len(query) > 200 else "")
+            )
+            if params:
+                print("[DB] Query params: " + str(params))
+
             conn = self.get_connection()
             if not conn:
+                print("[DB] Failed to get connection")
                 return []
             cursor = conn.cursor()
 
@@ -200,38 +210,84 @@ class DatabaseManager:
 
                 # Some zxJDBC drivers (like sqlite-jdbc wrapper) might fail on fetchall
                 try:
-                    return cursor.fetchall()
-                except:
+                    results = cursor.fetchall()
+                    print(
+                        "[DB] fetchall() returned {} rows".format(
+                            len(results) if results else 0
+                        )
+                    )
+                    return results if results else []
+                except Exception as e_fetchall:
+                    print(
+                        "[DB] fetchall() failed: "
+                        + str(e_fetchall)
+                        + ", trying iteration..."
+                    )
                     # Fallback iteration
                     results = []
-                    for row in cursor:
-                        results.append(row)
-                    return results
+                    try:
+                        row_count = 0
+                        while True:
+                            row = cursor.fetchone()
+                            if row is None:
+                                break
+                            results.append(row)
+                            row_count += 1
+                        print("[DB] Iteration fetched {} rows".format(row_count))
+                        return results
+                    except Exception as e_iter:
+                        print("[DB] Iteration also failed: " + str(e_iter))
+                        # Last resort: try for loop
+                        try:
+                            for row in cursor:
+                                results.append(row)
+                            print("[DB] For-loop fetched {} rows".format(len(results)))
+                            return results
+                        except Exception as e_for:
+                            print("[DB] For-loop also failed: " + str(e_for))
+                            return results  # Return whatever we got
             else:
                 # Standard sqlite3
                 if params:
                     cursor.execute(query, params)
                 else:
                     cursor.execute(query)
-                return cursor.fetchall()
+                results = cursor.fetchall()
+                print(
+                    "[DB] Standard sqlite3 returned {} rows".format(
+                        len(results) if results else 0
+                    )
+                )
+                return results if results else []
 
         except Exception as e:
             # Handle specific zxJDBC "not implemented" error if fetchall fails
             # Also catch "JavaException" which might wrap the underlying SQL error
             error_str = str(e).lower()
+            print("[DB] Exception in fetch_all: " + str(e))
+            print("[DB] Exception type: " + str(type(e)))
+
             if "not implemented" in error_str or "java" in error_str:
                 try:
                     # Fallback for drivers that don't support fetchall fully or correctly
                     results = []
                     # zxJDBC cursor is an iterator
-                    for row in cursor:
-                        results.append(row)
+                    if cursor:
+                        for row in cursor:
+                            results.append(row)
+                    print("[DB] Fallback iteration got {} rows".format(len(results)))
                     return results
                 except Exception as e2:
                     print("[DB] Error fetching data (fallback): " + str(e2))
+                    import traceback
+
+                    traceback.print_exc()
                     return []
 
             print("[DB] Error fetching data: " + str(e))
+            import traceback
+
+            traceback.print_exc()
             return []
         finally:
             if cursor:

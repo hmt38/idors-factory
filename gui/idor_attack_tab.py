@@ -718,8 +718,17 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
 
             # Fetch details
             sql = "SELECT request_data, response_data, original_request_id, payload_description, llm_verification_result FROM attack_queue WHERE id = ?"
+            print(
+                "[IDOR] Executing SQL: "
+                + sql
+                + " with params: ("
+                + str(attack_id)
+                + ",)"
+            )
             rows = self.extender.db_manager.fetch_all(sql, (attack_id,))
-            if rows:
+            print("[IDOR] Query returned {} rows".format(len(rows) if rows else 0))
+
+            if rows and len(rows) > 0:
                 req_data_json, res_data, orig_req_id, description, llm_result_json = (
                     rows[0]
                 )
@@ -728,24 +737,74 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
                 # Reconstruct request for display with parameter change annotations
                 try:
                     rd = json.loads(req_data_json)
+                    print("[IDOR] Parsed request_data JSON successfully")
 
                     # Get original request data for comparison
                     sql_orig_data = (
                         "SELECT path, query_params, body FROM raw_requests WHERE id = ?"
                     )
+                    print(
+                        "[IDOR] Fetching original request data for comparison, orig_req_id: "
+                        + str(orig_req_id)
+                    )
                     orig_data_rows = self.extender.db_manager.fetch_all(
                         sql_orig_data, (orig_req_id,)
                     )
+                    print(
+                        "[IDOR] Original data query returned {} rows".format(
+                            len(orig_data_rows) if orig_data_rows else 0
+                        )
+                    )
 
-                    if orig_data_rows:
+                    if orig_data_rows and len(orig_data_rows) > 0:
                         orig_path, orig_query_json, orig_body = orig_data_rows[0]
-                        # Reconstruct with annotations
-                        self.current_request = (
-                            self._reconstruct_request_with_annotations(
-                                rd, orig_path, orig_query_json, orig_body, description
+                        print(
+                            "[IDOR] Got original data: path={}, query={}, body={}".format(
+                                orig_path[:50] if orig_path else "None",
+                                orig_query_json[:50] if orig_query_json else "None",
+                                orig_body[:50] if orig_body else "None",
                             )
                         )
+                        # Reconstruct with annotations (fallback to normal if method doesn't exist)
+                        try:
+                            if hasattr(self, "_reconstruct_request_with_annotations"):
+                                self.current_request = (
+                                    self._reconstruct_request_with_annotations(
+                                        rd,
+                                        orig_path,
+                                        orig_query_json,
+                                        orig_body,
+                                        description,
+                                    )
+                                )
+                                print(
+                                    "[IDOR] Used _reconstruct_request_with_annotations"
+                                )
+                            else:
+                                print(
+                                    "[IDOR] _reconstruct_request_with_annotations not found, using normal reconstruction"
+                                )
+                                self.current_request = (
+                                    self.extender.attack_engine.reconstruct_request(
+                                        rd, self.extender._helpers
+                                    )
+                                )
+                        except Exception as e_annot:
+                            print(
+                                "[IDOR] Error in _reconstruct_request_with_annotations: "
+                                + str(e_annot)
+                            )
+                            # Fallback to normal reconstruction
+                            self.current_request = (
+                                self.extender.attack_engine.reconstruct_request(
+                                    rd, self.extender._helpers
+                                )
+                            )
+                            print("[IDOR] Used fallback normal reconstruction")
                     else:
+                        print(
+                            "[IDOR] No original data found, using normal reconstruction"
+                        )
                         # Fallback to normal reconstruction
                         self.current_request = (
                             self.extender.attack_engine.reconstruct_request(
@@ -754,6 +813,9 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
                         )
                 except Exception as e:
                     print("[IDOR] Error reconstructing request: " + str(e))
+                    import traceback
+
+                    traceback.print_exc()
                     self.current_request = None
 
                 # Attack Response
@@ -768,20 +830,57 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
                 # Original Request & Response
                 print("[IDOR] Fetching original req ID: " + str(orig_req_id))
                 sql_orig = "SELECT headers, body, method, url, response_headers, response_body FROM raw_requests WHERE id = ?"
+                print(
+                    "[IDOR] Executing SQL: "
+                    + sql_orig
+                    + " with params: ("
+                    + str(orig_req_id)
+                    + ",)"
+                )
                 orig_rows = self.extender.db_manager.fetch_all(sql_orig, (orig_req_id,))
-                if orig_rows:
+                print(
+                    "[IDOR] Original request query returned {} rows".format(
+                        len(orig_rows) if orig_rows else 0
+                    )
+                )
+
+                if orig_rows and len(orig_rows) > 0:
                     h_json, b, orig_method, orig_url, res_h_json, res_b = orig_rows[0]
+                    print(
+                        "[IDOR] Original row data: headers={}, body={}, method={}, url={}, res_headers={}, res_body={}".format(
+                            "present" if h_json else "None",
+                            "present" if b else "None",
+                            orig_method,
+                            orig_url[:50] if orig_url else "None",
+                            "present" if res_h_json else "None",
+                            "present" if res_b else "None",
+                        )
+                    )
                     try:
                         # Request
                         if h_json:
+                            print("[IDOR] Parsing original request headers JSON...")
                             h_list = json.loads(h_json)
+                            print(
+                                "[IDOR] Headers list has {} items".format(len(h_list))
+                            )
                             headers = ArrayList()
                             for h in h_list:
                                 headers.add(h)
                             if isinstance(b, unicode):
                                 b = b.encode("utf-8")
+                            elif b is None:
+                                b = ""
+                            print("[IDOR] Building original HTTP request message...")
                             self.current_original_request = (
                                 self.extender._helpers.buildHttpMessage(headers, b)
+                            )
+                            print(
+                                "[IDOR] Original request built successfully, size: {} bytes".format(
+                                    len(self.current_original_request)
+                                    if self.current_original_request
+                                    else 0
+                                )
                             )
                         else:
                             print(
@@ -792,19 +891,42 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
 
                         # Response
                         if res_h_json and res_b:
+                            print("[IDOR] Parsing original response headers JSON...")
                             res_h_list = json.loads(res_h_json)
+                            print(
+                                "[IDOR] Response headers list has {} items".format(
+                                    len(res_h_list)
+                                )
+                            )
                             res_headers = ArrayList()
                             for h in res_h_list:
                                 res_headers.add(h)
                             if isinstance(res_b, unicode):
                                 res_b = res_b.encode("utf-8")
+                            elif res_b is None:
+                                res_b = ""
+                            print("[IDOR] Building original HTTP response message...")
                             self.current_original_response = (
                                 self.extender._helpers.buildHttpMessage(
                                     res_headers, res_b
                                 )
                             )
+                            print(
+                                "[IDOR] Original response built successfully, size: {} bytes".format(
+                                    len(self.current_original_response)
+                                    if self.current_original_response
+                                    else 0
+                                )
+                            )
                         else:
-                            # print("[IDOR] Original Response missing for req ID " + str(orig_req_id))
+                            print(
+                                "[IDOR] Original Response missing for req ID "
+                                + str(orig_req_id)
+                                + " (res_h_json={}, res_b={})".format(
+                                    "present" if res_h_json else "None",
+                                    "present" if res_b else "None",
+                                )
+                            )
                             self.current_original_response = None
 
                         # Update Diff Tab with detailed parameter changes
@@ -967,6 +1089,7 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
 
                     except Exception as e:
                         print("[IDOR] Error building original messages: " + str(e))
+                        print("[IDOR] Exception type: " + str(type(e)))
                         import traceback
 
                         traceback.print_exc()
@@ -977,8 +1100,15 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
                         "[IDOR] Original request not found in DB for ID "
                         + str(orig_req_id)
                     )
+                    print(
+                        "[IDOR] This might indicate a database integrity issue - attack references non-existent original request"
+                    )
             else:
                 print("[IDOR] Attack details not found in DB for ID " + str(attack_id))
+                print("[IDOR] This might indicate:")
+                print("[IDOR]   1. Attack was deleted from database")
+                print("[IDOR]   2. Database query failed (check logs above)")
+                print("[IDOR]   3. Attack ID mismatch in table model")
 
             # Update editors
             print("[IDOR] Updating editors with data...")
@@ -1073,3 +1203,13 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
         else:
             items.append((parent_key, d))
         return dict(items)
+
+    def _reconstruct_request_with_annotations(
+        self, request_data, orig_path, orig_query_json, orig_body, description
+    ):
+        """Reconstruct request - simplified version, just use normal reconstruction"""
+        # For now, just use the normal reconstruction method
+        # The detailed parameter changes are shown in the Diff panel
+        return self.extender.attack_engine.reconstruct_request(
+            request_data, self.extender._helpers
+        )
