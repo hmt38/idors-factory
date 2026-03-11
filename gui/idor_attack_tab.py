@@ -2,8 +2,23 @@
 # -*- coding: utf-8 -*-
 
 from java.lang import Throwable
-from javax.swing import JPanel, JSplitPane, JTabbedPane, JScrollPane, JTable, JButton, JLabel, ListSelectionModel, SwingUtilities, JTextArea
-from javax.swing.table import AbstractTableModel, DefaultTableCellRenderer, TableRowSorter
+from javax.swing import (
+    JPanel,
+    JSplitPane,
+    JTabbedPane,
+    JScrollPane,
+    JTable,
+    JButton,
+    JLabel,
+    ListSelectionModel,
+    SwingUtilities,
+    JTextArea,
+)
+from javax.swing.table import (
+    AbstractTableModel,
+    DefaultTableCellRenderer,
+    TableRowSorter,
+)
 from java.awt import BorderLayout, FlowLayout, Color, Dimension, Font
 from java.awt.event import ActionListener
 from burp import IMessageEditorController
@@ -11,9 +26,19 @@ import json
 from java.util import ArrayList
 from threading import Thread
 
+
 class IDORAttackTableModel(AbstractTableModel):
     def __init__(self):
-        self.column_names = ["ID", "Method", "Path", "Status", "Code", "Risk", "LLM Result", "Description"]
+        self.column_names = [
+            "ID",
+            "Method",
+            "Path",
+            "Status",
+            "Code",
+            "Risk",
+            "LLM Result",
+            "Description",
+        ]
         self.attacks = []
 
     def getColumnCount(self):
@@ -26,81 +51,111 @@ class IDORAttackTableModel(AbstractTableModel):
         return self.column_names[col]
 
     def getValueAt(self, row, col):
-        if row >= len(self.attacks): return ""
+        if row >= len(self.attacks):
+            return ""
         attack = self.attacks[row]
         # attack tuple: (id, method, path, status, response_code, vulnerability_score, llm_result, description)
-        if col == 0: return attack[0]
-        if col == 1: return attack[1]
-        if col == 2: return attack[2]
-        if col == 3: return attack[3]
-        if col == 4: return str(attack[4]) if attack[4] else ""
-        if col == 5: return str(attack[5])
-        if col == 6: 
+        if col == 0:
+            return attack[0]
+        if col == 1:
+            return attack[1]
+        if col == 2:
+            return attack[2]
+        if col == 3:
+            return attack[3]
+        if col == 4:
+            return str(attack[4]) if attack[4] else ""
+        if col == 5:
+            return str(attack[5])
+        if col == 6:
             try:
                 if attack[6]:
                     res = json.loads(attack[6])
                     return res.get("result", "")
-            except: pass
+            except:
+                pass
             return ""
-        if col == 7: return attack[7]
+        if col == 7:
+            return attack[7]
         return ""
-    
+
     def set_attacks(self, attacks):
         self.attacks = attacks
         self.fireTableDataChanged()
+
 
 class RiskRenderer(DefaultTableCellRenderer):
     def __init__(self, extender=None):
         self.extender = extender
         self.risk_cache = {}
 
-    def getTableCellRendererComponent(self, table, value, isSelected, hasFocus, row, column):
-        c = super(RiskRenderer, self).getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column)
-        
+    def getTableCellRendererComponent(
+        self, table, value, isSelected, hasFocus, row, column
+    ):
+        c = super(RiskRenderer, self).getTableCellRendererComponent(
+            table, value, isSelected, hasFocus, row, column
+        )
+
         model = table.getModel()
         try:
             model_row = table.convertRowIndexToModel(row)
-            
+
             # Default colors
             fg_color = Color.BLACK
             bg_color = table.getBackground()
-            
+
             # 1. Check for Status (Column 3) specific coloring
             status = model.getValueAt(model_row, 3)
             if status == "VULNERABLE":
-                bg_color = Color(255, 200, 200) # Light Red
+                bg_color = Color(255, 200, 200)  # Light Red
             elif status == "SAFE":
-                bg_color = Color(200, 255, 200) # Light Green
+                bg_color = Color(200, 255, 200)  # Light Green
             elif status == "SENT":
-                bg_color = Color(255, 255, 200) # Light Yellow
+                bg_color = Color(255, 255, 200)  # Light Yellow
 
             # 2. Check for Sensitive API (Risk)
             method = model.getValueAt(model_row, 1)
             path = model.getValueAt(model_row, 2)
-            
+
             is_sensitive = False
             if method in ["POST", "PUT", "DELETE", "PATCH"]:
                 is_sensitive = True
-            if path and any(x in path.lower() for x in ["delete", "remove", "update", "modify", "add", "create", "change"]):
+            if path and any(
+                x in path.lower()
+                for x in [
+                    "delete",
+                    "remove",
+                    "update",
+                    "modify",
+                    "add",
+                    "create",
+                    "change",
+                ]
+            ):
                 is_sensitive = True
-                
+
             # Check LLM Risk via DB
             if self.extender:
                 try:
                     # We need to normalize path to match api_signature
                     # Access extractor helper if possible
                     api_sig = None
-                    if hasattr(self.extender, 'extractor'):
-                        api_sig = self.extender.extractor._get_api_signature(method, path)
-                    
+                    if hasattr(self.extender, "extractor"):
+                        api_sig = self.extender.extractor._get_api_signature(
+                            method, path
+                        )
+
                     if api_sig:
                         if api_sig in self.risk_cache:
                             if self.risk_cache[api_sig]:
                                 is_sensitive = True
                         else:
                             # Query DB
-                            if hasattr(self.extender, 'db_manager'):
-                                rows = self.extender.db_manager.fetch_all("SELECT is_sensitive FROM api_metadata WHERE api_signature = ?", (api_sig,))
+                            if hasattr(self.extender, "db_manager"):
+                                rows = self.extender.db_manager.fetch_all(
+                                    "SELECT is_sensitive FROM api_metadata WHERE api_signature = ?",
+                                    (api_sig,),
+                                )
                                 if rows:
                                     val = bool(rows[0][0])
                                     self.risk_cache[api_sig] = val
@@ -112,20 +167,24 @@ class RiskRenderer(DefaultTableCellRenderer):
                 except Exception as e:
                     # print("Error checking LLM risk: " + str(e))
                     pass
-                
+
             if is_sensitive:
                 fg_color = Color.RED
                 if not isSelected:
                     # Make font bold for sensitive? Font handling is tricky in renderer reusing component.
                     # Just stick to RED text.
                     pass
-            
+
             # Set Tooltip for Description (Column 7)
             if column == 7:
                 description = model.getValueAt(model_row, 7)
                 if description:
                     # Wrap in HTML for multiline tooltip if needed
-                    c.setToolTipText("<html><p width=\"500\">{}</p></html>".format(description.replace("\n", "<br>")))
+                    c.setToolTipText(
+                        '<html><p width="500">{}</p></html>'.format(
+                            description.replace("\n", "<br>")
+                        )
+                    )
             else:
                 c.setToolTipText(None)
 
@@ -133,102 +192,125 @@ class RiskRenderer(DefaultTableCellRenderer):
                 c.setBackground(table.getSelectionBackground())
                 c.setForeground(table.getSelectionForeground())
                 if is_sensitive:
-                     c.setForeground(Color(255, 100, 100))
+                    c.setForeground(Color(255, 100, 100))
             else:
                 c.setBackground(bg_color)
                 c.setForeground(fg_color)
-                
+
         except:
             # Fallback for unexpected errors
             c.setBackground(table.getBackground())
             c.setForeground(Color.BLACK)
-            
+
         return c
+
 
 class IDORAttackPanel(JPanel, IMessageEditorController):
     def __init__(self, extender):
         self.extender = extender
         self.layout = BorderLayout()
-        
+
         # Top Bar (Controls)
         self.top_panel = JPanel(FlowLayout(FlowLayout.LEFT))
-        
+
         self.btn_refresh = JButton("Refresh", actionPerformed=self.refresh_table)
-        self.btn_generate = JButton("Generate Attacks", actionPerformed=self.generate_attacks)
-        self.btn_execute = JButton("Execute Selected", actionPerformed=self.execute_selected)
+        self.btn_generate = JButton(
+            "Generate Attacks", actionPerformed=self.generate_attacks
+        )
+        self.btn_execute = JButton(
+            "Execute Selected", actionPerformed=self.execute_selected
+        )
+        self.btn_batch_get = JButton(
+            "Batch Attack GET", actionPerformed=self.batch_attack_get
+        )
         self.btn_clear = JButton("Clear", actionPerformed=self.clear_attacks)
-        
+
         self.top_panel.add(self.btn_refresh)
         self.top_panel.add(self.btn_generate)
         self.top_panel.add(self.btn_execute)
+        self.top_panel.add(self.btn_batch_get)
         self.top_panel.add(self.btn_clear)
-        self.top_panel.add(JLabel(" | Sensitive APIs (POST/PUT/DELETE) are highlighted in RED and require manual execution."))
-        
+        self.top_panel.add(
+            JLabel(
+                " | Sensitive APIs (POST/PUT/DELETE) are highlighted in RED and require manual execution."
+            )
+        )
+
         self.add(self.top_panel, BorderLayout.NORTH)
-        
+
         # Main Split Pane
         self.split_pane = JSplitPane(JSplitPane.HORIZONTAL_SPLIT)
         self.add(self.split_pane, BorderLayout.CENTER)
-        
+
         # Left: Table
         self.table_model = IDORAttackTableModel()
         self.table = JTable(self.table_model)
         self.table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION)
-        self.table.getSelectionModel().addListSelectionListener(lambda e: self.on_selection_change(e))
-        
+        self.table.getSelectionModel().addListSelectionListener(
+            lambda e: self.on_selection_change(e)
+        )
+
         # Sorting
         self.sorter = TableRowSorter(self.table_model)
         self.table.setRowSorter(self.sorter)
-        
+
         # Renderer
         for i in range(self.table.getColumnCount()):
             renderer = RiskRenderer(self.extender)
             self.table.getColumnModel().getColumn(i).setCellRenderer(renderer)
-            
+
         # Set Tooltip for Description Column (Index 7)
         # Note: RiskRenderer needs to handle tooltip.
-        
+
         self.scroll_pane = JScrollPane(self.table)
         self.split_pane.setLeftComponent(self.scroll_pane)
-        
+
         # Right: Details Area (Vertical Split)
         self.details_split_pane = JSplitPane(JSplitPane.VERTICAL_SPLIT)
         self.split_pane.setRightComponent(self.details_split_pane)
-        
+
         # Top Panel: Attack Request, Attack Response, Diff
         self.top_tabs = JTabbedPane()
-        
+
         self.request_editor = self.extender._callbacks.createMessageEditor(self, False)
         self.response_editor = self.extender._callbacks.createMessageEditor(self, False)
-        
+
         self.diff_text = JTextArea()
         self.diff_text.setEditable(False)
         self.diff_text.setFont(Font("Monospaced", Font.PLAIN, 12))
-        
+
         self.top_tabs.addTab("Attack Request", self.request_editor.getComponent())
         self.top_tabs.addTab("Attack Response", self.response_editor.getComponent())
         self.top_tabs.addTab("Diff", JScrollPane(self.diff_text))
-        
+
         self.details_split_pane.setTopComponent(self.top_tabs)
-        
+
         # Bottom Panel: Original Request, Original Response
         self.bottom_tabs = JTabbedPane()
-        
-        self.original_request_editor = self.extender._callbacks.createMessageEditor(self, False)
-        self.original_response_editor = self.extender._callbacks.createMessageEditor(self, False)
-        
-        self.bottom_tabs.addTab("Original Request", self.original_request_editor.getComponent())
-        self.bottom_tabs.addTab("Original Response", self.original_response_editor.getComponent())
-        
+
+        self.original_request_editor = self.extender._callbacks.createMessageEditor(
+            self, False
+        )
+        self.original_response_editor = self.extender._callbacks.createMessageEditor(
+            self, False
+        )
+
+        self.bottom_tabs.addTab(
+            "Original Request", self.original_request_editor.getComponent()
+        )
+        self.bottom_tabs.addTab(
+            "Original Response", self.original_response_editor.getComponent()
+        )
+
         self.details_split_pane.setBottomComponent(self.bottom_tabs)
-        
+
         # Current selection data
         self.current_request = None
         self.current_response = None
         self.current_original_request = None
         self.current_original_response = None
         self.current_http_service = None
-        
+
         self.split_pane.setDividerLocation(600)
         self.details_split_pane.setDividerLocation(300)
 
@@ -238,84 +320,110 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
         # But for the table, we want to display Method/Path.
         # attack_queue: request_data BLOB. We can parse it, but it's slow for list.
         # Actually raw_requests has method/path.
-        # query: SELECT a.id, r.method, r.path, a.status, a.response_code, a.vulnerability_score, a.llm_verification_result, a.payload_description 
+        # query: SELECT a.id, r.method, r.path, a.status, a.response_code, a.vulnerability_score, a.llm_verification_result, a.payload_description
         # FROM attack_queue a JOIN raw_requests r ON a.original_request_id = r.id
-        
-        sql = '''
+
+        sql = """
         SELECT a.id, r.method, r.path, a.status, a.response_code, a.vulnerability_score, a.llm_verification_result, a.payload_description 
         FROM attack_queue a 
         JOIN raw_requests r ON a.original_request_id = r.id
         ORDER BY a.id DESC
-        '''
-        if hasattr(self.extender, 'db_manager'):
+        """
+        if hasattr(self.extender, "db_manager"):
             rows = self.extender.db_manager.fetch_all(sql)
             self.table_model.set_attacks(rows)
 
     def generate_attacks(self, event):
         # Trigger generation in background
         def run():
-            if hasattr(self.extender, 'attack_engine'):
+            if hasattr(self.extender, "attack_engine"):
                 self.extender.attack_engine.generate_attacks()
                 SwingUtilities.invokeLater(lambda: self.refresh_table())
-        
+
         t = Thread(target=run)
         t.start()
 
     def execute_selected(self, event):
         selected_row = self.table.getSelectedRow()
-        if selected_row == -1: return
-        
+        if selected_row == -1:
+            return
+
         model_row = self.table.convertRowIndexToModel(selected_row)
         attack_id = self.table_model.getValueAt(model_row, 0)
-        
+
         # Log selection
-        print("[IDOR] Execute Selected clicked. Row: {}, Model Row: {}, Attack ID: {}".format(selected_row, model_row, attack_id))
-        
+        print(
+            "[IDOR] Execute Selected clicked. Row: {}, Model Row: {}, Attack ID: {}".format(
+                selected_row, model_row, attack_id
+            )
+        )
+
         def run():
-            if hasattr(self.extender, 'attack_engine'):
+            if hasattr(self.extender, "attack_engine"):
                 # Prepare LLM config
                 llm_config = {
-                    'enabled': self.extender.enableLlm.isSelected(),
-                    'base_url': self.extender.llmBaseUrl.getText(),
-                    'api_key': self.extender.llmApiKey.getText(),
-                    'model': self.extender.llmModel.getText(),
-                    'analyze_result': self.extender.llmAnalyzeResult.isSelected()
+                    "enabled": self.extender.enableLlm.isSelected(),
+                    "base_url": self.extender.llmBaseUrl.getText(),
+                    "api_key": self.extender.llmApiKey.getText(),
+                    "model": self.extender.llmModel.getText(),
+                    "analyze_result": self.extender.llmAnalyzeResult.isSelected(),
                 }
-                
+
                 # Show progress
-                if hasattr(self.extender, 'progressBar'):
-                    SwingUtilities.invokeLater(lambda: self.extender.progressBar.setIndeterminate(True))
-                    SwingUtilities.invokeLater(lambda: self.extender.progressBar.setString("Executing Attack ID {}...".format(attack_id)))
-                    SwingUtilities.invokeLater(lambda: self.extender.progressBar.setStringPainted(True))
+                if hasattr(self.extender, "progressBar"):
+                    SwingUtilities.invokeLater(
+                        lambda: self.extender.progressBar.setIndeterminate(True)
+                    )
+                    SwingUtilities.invokeLater(
+                        lambda: self.extender.progressBar.setString(
+                            "Executing Attack ID {}...".format(attack_id)
+                        )
+                    )
+                    SwingUtilities.invokeLater(
+                        lambda: self.extender.progressBar.setStringPainted(True)
+                    )
 
                 print("[IDOR] Launching execution for Attack ID: {}".format(attack_id))
                 result = self.extender.attack_engine.execute_attack(
-                    attack_id, 
-                    self.extender._callbacks, 
+                    attack_id,
+                    self.extender._callbacks,
                     self.extender._helpers,
-                    llm_config
+                    llm_config,
                 )
-                
+
                 # Clear progress
-                if hasattr(self.extender, 'progressBar'):
-                    SwingUtilities.invokeLater(lambda: self.extender.progressBar.setIndeterminate(False))
-                    SwingUtilities.invokeLater(lambda: self.extender.progressBar.setString("Execution Complete"))
-                    
+                if hasattr(self.extender, "progressBar"):
+                    SwingUtilities.invokeLater(
+                        lambda: self.extender.progressBar.setIndeterminate(False)
+                    )
+                    SwingUtilities.invokeLater(
+                        lambda: self.extender.progressBar.setString(
+                            "Execution Complete"
+                        )
+                    )
+
                     def reset():
-                         import time
-                         time.sleep(2)
-                         if hasattr(self.extender, 'progressBar'):
-                            SwingUtilities.invokeLater(lambda: self.extender.progressBar.setString(""))
-                            SwingUtilities.invokeLater(lambda: self.extender.progressBar.setStringPainted(False))
-                    
+                        import time
+
+                        time.sleep(2)
+                        if hasattr(self.extender, "progressBar"):
+                            SwingUtilities.invokeLater(
+                                lambda: self.extender.progressBar.setString("")
+                            )
+                            SwingUtilities.invokeLater(
+                                lambda: self.extender.progressBar.setStringPainted(
+                                    False
+                                )
+                            )
+
                     # Simple async reset if possible, or just leave it
                     t_reset = Thread(target=reset)
                     t_reset.start()
-                
+
                 def update_ui():
                     # 1. Refresh table data
                     self.refresh_table()
-                    
+
                     # 2. Restore selection (Find row with attack_id)
                     try:
                         found = False
@@ -325,32 +433,171 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
                                 # Found the row in model, convert to view
                                 view_idx = self.table.convertRowIndexToView(model_idx)
                                 if view_idx != -1:
-                                    self.table.setRowSelectionInterval(view_idx, view_idx)
+                                    self.table.setRowSelectionInterval(
+                                        view_idx, view_idx
+                                    )
                                     # Scroll to visible
-                                    self.table.scrollRectToVisible(self.table.getCellRect(view_idx, 0, True))
+                                    self.table.scrollRectToVisible(
+                                        self.table.getCellRect(view_idx, 0, True)
+                                    )
                                     found = True
                                 break
-                        
+
                         if not found:
-                            print("[IDOR] Could not restore selection for Attack ID: " + str(attack_id))
+                            print(
+                                "[IDOR] Could not restore selection for Attack ID: "
+                                + str(attack_id)
+                            )
                     except Exception as e:
                         print("[IDOR] Error restoring selection: " + str(e))
 
                 SwingUtilities.invokeLater(update_ui)
-        
+
         t = Thread(target=run)
         t.start()
 
     def clear_attacks(self, event):
-        if hasattr(self.extender, 'db_manager'):
+        if hasattr(self.extender, "db_manager"):
             self.extender.db_manager.execute_query("DELETE FROM attack_queue")
             self.refresh_table()
+
+    def batch_attack_get(self, event):
+        """
+        Batch execute all GET method attacks that are in PENDING status.
+        """
+
+        def run():
+            if not hasattr(self.extender, "attack_engine") or not hasattr(
+                self.extender, "db_manager"
+            ):
+                print("[Batch Attack] Attack engine or DB manager not initialized.")
+                return
+
+            # 1. Fetch all GET attacks with PENDING status
+            sql = """
+            SELECT a.id, r.method 
+            FROM attack_queue a 
+            JOIN raw_requests r ON a.original_request_id = r.id
+            WHERE a.status = 'PENDING' AND r.method = 'GET'
+            ORDER BY a.vulnerability_score DESC
+            """
+            attacks = self.extender.db_manager.fetch_all(sql)
+
+            if not attacks:
+                print("[Batch Attack] No PENDING GET attacks found.")
+                if hasattr(self.extender, "progressBar"):
+                    SwingUtilities.invokeLater(
+                        lambda: self.extender.progressBar.setString(
+                            "No GET attacks to execute"
+                        )
+                    )
+                    SwingUtilities.invokeLater(
+                        lambda: self.extender.progressBar.setStringPainted(True)
+                    )
+                return
+
+            total = len(attacks)
+            print("[Batch Attack] Found {} GET attacks to execute.".format(total))
+
+            # Prepare LLM config
+            llm_config = {
+                "enabled": self.extender.enableLlm.isSelected()
+                if hasattr(self.extender, "enableLlm")
+                else False,
+                "base_url": self.extender.llmBaseUrl.getText()
+                if hasattr(self.extender, "llmBaseUrl")
+                else "",
+                "api_key": self.extender.llmApiKey.getText()
+                if hasattr(self.extender, "llmApiKey")
+                else "",
+                "model": self.extender.llmModel.getText()
+                if hasattr(self.extender, "llmModel")
+                else "",
+                "analyze_result": self.extender.llmAnalyzeResult.isSelected()
+                if hasattr(self.extender, "llmAnalyzeResult")
+                else False,
+            }
+
+            # 2. Execute attacks one by one
+            success_count = 0
+            failed_count = 0
+            vulnerable_count = 0
+
+            for idx, attack_row in enumerate(attacks):
+                attack_id = attack_row[0]
+
+                # Update progress bar
+                progress = int((idx + 1) * 100.0 / total)
+                if hasattr(self.extender, "progressBar"):
+
+                    def update_progress(p=progress, i=idx + 1, t=total, aid=attack_id):
+                        self.extender.progressBar.setIndeterminate(False)
+                        self.extender.progressBar.setString(
+                            "Executing GET Attacks: {}/{} ({}%) - ID: {}".format(
+                                i, t, p, aid
+                            )
+                        )
+                        self.extender.progressBar.setStringPainted(True)
+
+                    SwingUtilities.invokeLater(update_progress)
+
+                # Execute attack
+                try:
+                    result = self.extender.attack_engine.execute_attack(
+                        attack_id,
+                        self.extender._callbacks,
+                        self.extender._helpers,
+                        llm_config,
+                    )
+
+                    if result:
+                        success_count += 1
+                        if result.get("status") == "VULNERABLE":
+                            vulnerable_count += 1
+                        print(
+                            "[Batch Attack] Executed attack ID: {} - Status: {}".format(
+                                attack_id, result.get("status", "UNKNOWN")
+                            )
+                        )
+                    else:
+                        failed_count += 1
+                        print(
+                            "[Batch Attack] Failed to execute attack ID: {}".format(
+                                attack_id
+                            )
+                        )
+
+                except Exception as e:
+                    failed_count += 1
+                    print(
+                        "[Batch Attack] Error executing attack {}: {}".format(
+                            attack_id, str(e)
+                        )
+                    )
+
+            # 3. Show completion message
+            summary = "Batch Attack Complete: {}/{} executed, {} vulnerable, {} failed".format(
+                success_count, total, vulnerable_count, failed_count
+            )
+            print("[Batch Attack] " + summary)
+
+            if hasattr(self.extender, "progressBar"):
+                SwingUtilities.invokeLater(
+                    lambda s=summary: self.extender.progressBar.setString(s)
+                )
+
+            # 4. Refresh table
+            SwingUtilities.invokeLater(lambda: self.refresh_table())
+
+        # Run in background thread
+        t = Thread(target=run)
+        t.start()
 
     def on_selection_change(self, event):
         try:
             # Log event entry
             # print("[IDOR] on_selection_change triggered")
-            
+
             # Ignore valueIsAdjusting events to avoid double updates?
             # Let's log if we skip
             if event and event.getValueIsAdjusting():
@@ -359,56 +606,67 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
 
             selected_row = self.table.getSelectedRow()
             print("[IDOR] on_selection_change. Selected row: " + str(selected_row))
-            
+
             # Reset state immediately
             self.current_request = None
             self.current_response = None
             self.current_original_request = None
             self.current_original_response = None
             self.diff_text.setText("")
-            
+
             # Clear editors first
             try:
                 empty_msg = self.extender._helpers.stringToBytes("")
-                if self.request_editor: self.request_editor.setMessage(empty_msg, False)
-                if self.response_editor: self.response_editor.setMessage(empty_msg, False)
-                if self.original_request_editor: self.original_request_editor.setMessage(empty_msg, False)
-                if self.original_response_editor: self.original_response_editor.setMessage(empty_msg, False)
+                if self.request_editor:
+                    self.request_editor.setMessage(empty_msg, False)
+                if self.response_editor:
+                    self.response_editor.setMessage(empty_msg, False)
+                if self.original_request_editor:
+                    self.original_request_editor.setMessage(empty_msg, False)
+                if self.original_response_editor:
+                    self.original_response_editor.setMessage(empty_msg, False)
             except Exception as e_clear:
-                 print("[IDOR] Error clearing editors: " + str(e_clear))
+                print("[IDOR] Error clearing editors: " + str(e_clear))
 
             if selected_row == -1:
                 return
 
             model_row = self.table.convertRowIndexToModel(selected_row)
             print("[IDOR] Converted to model row: " + str(model_row))
-            
+
             attack_id = self.table_model.getValueAt(model_row, 0)
             print("[IDOR] Fetching details for Attack ID: " + str(attack_id))
-            
+
             # Fetch details
             sql = "SELECT request_data, response_data, original_request_id, payload_description, llm_verification_result FROM attack_queue WHERE id = ?"
             rows = self.extender.db_manager.fetch_all(sql, (attack_id,))
             if rows:
-                req_data_json, res_data, orig_req_id, description, llm_result_json = rows[0]
+                req_data_json, res_data, orig_req_id, description, llm_result_json = (
+                    rows[0]
+                )
                 print("[IDOR] Data fetched. Orig Req ID: " + str(orig_req_id))
-                
+
                 # Reconstruct request for display
                 try:
                     rd = json.loads(req_data_json)
-                    self.current_request = self.extender.attack_engine.reconstruct_request(rd, self.extender._helpers)
+                    self.current_request = (
+                        self.extender.attack_engine.reconstruct_request(
+                            rd, self.extender._helpers
+                        )
+                    )
                 except Exception as e:
                     print("[IDOR] Error reconstructing request: " + str(e))
                     self.current_request = None
-                    
+
                 # Attack Response
                 if res_data:
                     # print("[IDOR] Response data found (" + str(len(res_data)) + " bytes)")
-                    if isinstance(res_data, unicode): res_data = res_data.encode('utf-8')
+                    if isinstance(res_data, unicode):
+                        res_data = res_data.encode("utf-8")
                     self.current_response = res_data
                 else:
                     self.current_response = None
-                    
+
                 # Original Request & Response
                 print("[IDOR] Fetching original req ID: " + str(orig_req_id))
                 sql_orig = "SELECT headers, body, method, url, response_headers, response_body FROM raw_requests WHERE id = ?"
@@ -420,20 +678,33 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
                         if h_json:
                             h_list = json.loads(h_json)
                             headers = ArrayList()
-                            for h in h_list: headers.add(h)
-                            if isinstance(b, unicode): b = b.encode('utf-8')
-                            self.current_original_request = self.extender._helpers.buildHttpMessage(headers, b)
+                            for h in h_list:
+                                headers.add(h)
+                            if isinstance(b, unicode):
+                                b = b.encode("utf-8")
+                            self.current_original_request = (
+                                self.extender._helpers.buildHttpMessage(headers, b)
+                            )
                         else:
-                            print("[IDOR] Error: Original headers missing for req ID " + str(orig_req_id))
+                            print(
+                                "[IDOR] Error: Original headers missing for req ID "
+                                + str(orig_req_id)
+                            )
                             self.current_original_request = None
-                        
+
                         # Response
                         if res_h_json and res_b:
                             res_h_list = json.loads(res_h_json)
                             res_headers = ArrayList()
-                            for h in res_h_list: res_headers.add(h)
-                            if isinstance(res_b, unicode): res_b = res_b.encode('utf-8')
-                            self.current_original_response = self.extender._helpers.buildHttpMessage(res_headers, res_b)
+                            for h in res_h_list:
+                                res_headers.add(h)
+                            if isinstance(res_b, unicode):
+                                res_b = res_b.encode("utf-8")
+                            self.current_original_response = (
+                                self.extender._helpers.buildHttpMessage(
+                                    res_headers, res_b
+                                )
+                            )
                         else:
                             # print("[IDOR] Original Response missing for req ID " + str(orig_req_id))
                             self.current_original_response = None
@@ -442,61 +713,95 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
                         diff_sb = []
                         diff_sb.append("=== Attack Description ===")
                         diff_sb.append(description)
-                        
+
                         # Add LLM Result if available
                         if llm_result_json and llm_result_json != "PENDING":
                             try:
                                 res = json.loads(llm_result_json)
                                 diff_sb.append("\n=== LLM Analysis Result ===")
-                                diff_sb.append("Result: " + res.get("result", "UNKNOWN"))
-                                diff_sb.append("Reason: " + res.get("reason", "No reason provided"))
+                                diff_sb.append(
+                                    "Result: " + res.get("result", "UNKNOWN")
+                                )
+                                diff_sb.append(
+                                    "Reason: " + res.get("reason", "No reason provided")
+                                )
                             except:
                                 diff_sb.append("\n=== LLM Analysis Result (Raw) ===")
                                 diff_sb.append(str(llm_result_json))
-                        
+
                         diff_sb.append("\n=== Original Request Line ===")
                         diff_sb.append("{} {}".format(orig_method, orig_url))
                         diff_sb.append("\n=== Attack Request Line ===")
                         # Extract from current_request
                         if self.current_request:
-                            req_info = self.extender._helpers.analyzeRequest(self.current_request)
+                            req_info = self.extender._helpers.analyzeRequest(
+                                self.current_request
+                            )
                             # getUrl() fails if service not provided during analysis context sometimes
                             # Safely get path
                             try:
-                                diff_sb.append("{} {}".format(req_info.getMethod(), req_info.getUrl().getFile())) 
+                                diff_sb.append(
+                                    "{} {}".format(
+                                        req_info.getMethod(),
+                                        req_info.getUrl().getFile(),
+                                    )
+                                )
                             except:
                                 # Fallback: parse from bytes
                                 try:
-                                    first_line = self.extender._helpers.bytesToString(self.current_request).split('\n')[0]
+                                    first_line = self.extender._helpers.bytesToString(
+                                        self.current_request
+                                    ).split("\n")[0]
                                     diff_sb.append(first_line)
                                 except:
                                     diff_sb.append("Error parsing request line")
-                        
+
                         self.diff_text.setText("\n".join(diff_sb))
                         self.diff_text.setCaretPosition(0)
-                        
+
                     except Exception as e:
                         print("[IDOR] Error building original messages: " + str(e))
                         import traceback
+
                         traceback.print_exc()
                         self.current_original_request = None
                         self.current_original_response = None
                 else:
-                    print("[IDOR] Original request not found in DB for ID " + str(orig_req_id))
+                    print(
+                        "[IDOR] Original request not found in DB for ID "
+                        + str(orig_req_id)
+                    )
             else:
                 print("[IDOR] Attack details not found in DB for ID " + str(attack_id))
-                
+
             # Update editors
             print("[IDOR] Updating editors with data...")
+
             def update_editors():
                 try:
                     empty_msg = self.extender._helpers.stringToBytes("")
-                    
-                    self.request_editor.setMessage(self.current_request if self.current_request else empty_msg, True)
-                    self.response_editor.setMessage(self.current_response if self.current_response else empty_msg, False)
-                    self.original_request_editor.setMessage(self.current_original_request if self.current_original_request else empty_msg, True)
-                    self.original_response_editor.setMessage(self.current_original_response if self.current_original_response else empty_msg, False)
-                    
+
+                    self.request_editor.setMessage(
+                        self.current_request if self.current_request else empty_msg,
+                        True,
+                    )
+                    self.response_editor.setMessage(
+                        self.current_response if self.current_response else empty_msg,
+                        False,
+                    )
+                    self.original_request_editor.setMessage(
+                        self.current_original_request
+                        if self.current_original_request
+                        else empty_msg,
+                        True,
+                    )
+                    self.original_response_editor.setMessage(
+                        self.current_original_response
+                        if self.current_original_response
+                        else empty_msg,
+                        False,
+                    )
+
                     # Ensure divider location is sane (sometimes it collapses)
                     if self.details_split_pane.getDividerLocation() < 50:
                         self.details_split_pane.setDividerLocation(300)
@@ -507,17 +812,21 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
                 update_editors()
             else:
                 SwingUtilities.invokeLater(update_editors)
-            
+
             # Update HTTP Service (Host/Port)
             try:
                 rd = json.loads(req_data_json)
-                host = rd['host']
-                self.current_http_service = self.extender._helpers.buildHttpService(host, 80, "http") # Placeholder
-            except: pass
-            
+                host = rd["host"]
+                self.current_http_service = self.extender._helpers.buildHttpService(
+                    host, 80, "http"
+                )  # Placeholder
+            except:
+                pass
+
         except Exception as e_main:
             print("[IDOR] Critical Exception in on_selection_change: " + str(e_main))
             import traceback
+
             traceback.print_exc()
         except Throwable as t:
             print("[IDOR] Critical Java Error in on_selection_change: " + str(t))
