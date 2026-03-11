@@ -264,9 +264,13 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
         self.table_model = IDORAttackTableModel()
         self.table = JTable(self.table_model)
         self.table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION)
-        self.table.getSelectionModel().addListSelectionListener(
-            lambda e: self.on_selection_change(e)
-        )
+
+        # Add selection listener with explicit logging
+        print("[IDOR] Registering selection listener for table...")
+        selection_model = self.table.getSelectionModel()
+        print("[IDOR] Selection model: " + str(selection_model))
+        selection_model.addListSelectionListener(lambda e: self.on_selection_change(e))
+        print("[IDOR] Selection listener registered successfully")
 
         # Sorting
         self.sorter = TableRowSorter(self.table_model)
@@ -675,16 +679,21 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
     def on_selection_change(self, event):
         try:
             # Log event entry
-            # print("[IDOR] on_selection_change triggered")
+            print("[IDOR] ========== on_selection_change TRIGGERED ==========")
+            print("[IDOR] Event object: " + str(event))
+            print("[IDOR] Event type: " + str(type(event)))
 
             # Ignore valueIsAdjusting events to avoid double updates?
             # Let's log if we skip
             if event and event.getValueIsAdjusting():
                 print("[IDOR] Skipping on_selection_change (adjusting)")
-                # return # Just let it pass for now to ensure update happens
+                return  # Actually skip to avoid double processing
 
             selected_row = self.table.getSelectedRow()
             print("[IDOR] on_selection_change. Selected row: " + str(selected_row))
+            print(
+                "[IDOR] Table model row count: " + str(self.table_model.getRowCount())
+            )
 
             # Reset state immediately
             self.current_request = None
