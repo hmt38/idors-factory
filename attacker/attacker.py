@@ -135,10 +135,10 @@ class AttackEngine:
             sql_param_users = """
             SELECT param_name, COUNT(DISTINCT user_identifier) as param_users
             FROM parameter_pool
-            WHERE api_signature = ?
+            WHERE api_signature = '{}'
             GROUP BY param_name
-            """
-            param_rows = self.db_manager.fetch_all(sql_param_users, (api_signature,))
+            """.format(api_signature.replace("'", "''"))
+            param_rows = self.db_manager.fetch_all(sql_param_users)
 
             for param_row in param_rows:
                 param_name, param_users = param_row
@@ -177,11 +177,11 @@ class AttackEngine:
                     update_sql = """
                     UPDATE parameter_pool 
                     SET risk_score = MIN(risk_score + 20, 100)
-                    WHERE api_signature = ? AND param_name = ?
-                    """
-                    self.db_manager.execute_query(
-                        update_sql, (api_signature, param_name)
+                    WHERE api_signature = '{}' AND param_name = '{}'
+                    """.format(
+                        api_signature.replace("'", "''"), param_name.replace("'", "''")
                     )
+                    self.db_manager.execute_query(update_sql)
 
     def _process_request(self, req):
         (
@@ -239,10 +239,12 @@ class AttackEngine:
         for name, value, location in current_params:
             # Query risk score from pool (assuming we have it stored)
             # If not found, default to 0.
-            sql = "SELECT risk_score FROM parameter_pool WHERE api_signature = ? AND param_name = ? AND user_identifier = ?"
-            rows = self.db_manager.fetch_all(
-                sql, (api_signature, name, user_identifier)
+            sql = "SELECT risk_score FROM parameter_pool WHERE api_signature = '{}' AND param_name = '{}' AND user_identifier = '{}'".format(
+                api_signature.replace("'", "''"),
+                name.replace("'", "''"),
+                user_identifier.replace("'", "''"),
             )
+            rows = self.db_manager.fetch_all(sql)
             score = 0
             if rows:
                 score = rows[0][0]
@@ -269,11 +271,11 @@ class AttackEngine:
         # Ideally, we find a user who has values for ALL the target_params.
         # But maybe they only have values for some.
 
-        sql_users = "SELECT DISTINCT user_identifier FROM parameter_pool WHERE api_signature = ? AND user_identifier != ?"
+        sql_users = "SELECT DISTINCT user_identifier FROM parameter_pool WHERE api_signature = '{}' AND user_identifier != '{}'".format(
+            api_signature.replace("'", "''"), user_identifier.replace("'", "''")
+        )
         try:
-            other_users = self.db_manager.fetch_all(
-                sql_users, (api_signature, user_identifier)
-            )
+            other_users = self.db_manager.fetch_all(sql_users)
         except Exception as e_db:
             print("[Attacker] Error fetching other users: " + str(e_db))
             return
@@ -293,12 +295,12 @@ class AttackEngine:
             )
 
             # Fetch all params for this other user on this API
-            sql_other_params = "SELECT param_name, param_value FROM parameter_pool WHERE api_signature = ? AND user_identifier = ?"
+            sql_other_params = "SELECT param_name, param_value FROM parameter_pool WHERE api_signature = '{}' AND user_identifier = '{}'".format(
+                api_signature.replace("'", "''"), other_user.replace("'", "''")
+            )
             other_param_rows = []
             try:
-                other_param_rows = self.db_manager.fetch_all(
-                    sql_other_params, (api_signature, other_user)
-                )
+                other_param_rows = self.db_manager.fetch_all(sql_other_params)
             except Exception as e_p:
                 print("[Attacker] Error fetching other user params: " + str(e_p))
                 continue
@@ -561,7 +563,9 @@ class AttackEngine:
         # req_data is tuple: (id, method, host, url, path, headers, query, body, user)
         # Check if already analyzed
         rows = self.db_manager.fetch_all(
-            "SELECT 1 FROM api_metadata WHERE api_signature = ?", (api_signature,)
+            "SELECT 1 FROM api_metadata WHERE api_signature = '{}'".format(
+                api_signature.replace("'", "''")
+            )
         )
         if rows:
             return
@@ -718,8 +722,11 @@ class AttackEngine:
         from java.net import URL
 
         # 1. Fetch attack data
-        sql = "SELECT request_data, original_request_id FROM attack_queue WHERE id = ?"
-        rows = self.db_manager.fetch_all(sql, (attack_id,))
+        sql = (
+            "SELECT request_data, original_request_id FROM attack_queue WHERE id = "
+            + str(attack_id)
+        )
+        rows = self.db_manager.fetch_all(sql)
         if not rows:
             print("[Attacker] Attack ID {} not found.".format(attack_id))
             return None
@@ -739,8 +746,8 @@ class AttackEngine:
 
         # 3. Determine Service Details (Host, Port, Protocol)
         # We fetch original URL to determine port/protocol
-        sql_url = "SELECT url FROM raw_requests WHERE id = ?"
-        url_rows = self.db_manager.fetch_all(sql_url, (original_req_id,))
+        sql_url = "SELECT url FROM raw_requests WHERE id = " + str(original_req_id)
+        url_rows = self.db_manager.fetch_all(sql_url)
 
         host = request_data["host"]  # Default host from saved data
         port = 80
@@ -796,9 +803,10 @@ class AttackEngine:
 
                 # Fetch original request string
                 orig_req_sql = (
-                    "SELECT method, url, headers, body FROM raw_requests WHERE id = ?"
+                    "SELECT method, url, headers, body FROM raw_requests WHERE id = "
+                    + str(original_req_id)
                 )
-                orig_rows = self.db_manager.fetch_all(orig_req_sql, (original_req_id,))
+                orig_rows = self.db_manager.fetch_all(orig_req_sql)
                 orig_req_str = ""
                 if orig_rows:
                     m, u, h_json, b = orig_rows[0]
@@ -830,12 +838,15 @@ class AttackEngine:
         # 7. Update DB
         update_sql = """
         UPDATE attack_queue 
-        SET status = ?, response_data = ?, response_code = ?, llm_verification_result = ?
-        WHERE id = ?
-        """
-        self.db_manager.execute_query(
-            update_sql,
-            (status, response_data, response_code, llm_result_str, attack_id),
+        SET status = '{}', response_data = '{}', response_code = {}, llm_verification_result = '{}'
+        WHERE id = {}
+        """.format(
+            status,
+            response_data.replace("'", "''"),
+            response_code,
+            llm_result_str.replace("'", "''"),
+            attack_id,
         )
+        self.db_manager.execute_query(update_sql)
 
         return {"id": attack_id, "status": status, "code": response_code}

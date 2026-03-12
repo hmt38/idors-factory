@@ -112,7 +112,7 @@ class RiskRenderer(DefaultTableCellRenderer):
             if self.extender and hasattr(self.extender, "db_manager"):
                 try:
                     rows = self.extender.db_manager.fetch_all(
-                        "SELECT verified FROM attack_queue WHERE id = ?", (attack_id,)
+                        "SELECT verified FROM attack_queue WHERE id = " + str(attack_id)
                     )
                     if rows and rows[0][0]:
                         is_verified = True
@@ -171,8 +171,9 @@ class RiskRenderer(DefaultTableCellRenderer):
                             # Query DB
                             if hasattr(self.extender, "db_manager"):
                                 rows = self.extender.db_manager.fetch_all(
-                                    "SELECT is_sensitive FROM api_metadata WHERE api_signature = ?",
-                                    (api_sig,),
+                                    "SELECT is_sensitive FROM api_metadata WHERE api_signature = '{}'".format(
+                                        api_sig.replace("'", "''")
+                                    )
                                 )
                                 if rows:
                                     val = bool(rows[0][0])
@@ -225,8 +226,11 @@ class RiskRenderer(DefaultTableCellRenderer):
 
 class IDORAttackPanel(JPanel, IMessageEditorController):
     def __init__(self, extender):
+        print("[IDOR] ========== IDORAttackPanel.__init__ CALLED ==========")
+        print("[IDOR] Extender object: " + str(extender))
         self.extender = extender
         self.layout = BorderLayout()
+        print("[IDOR] Layout created")
 
         # Top Bar (Controls)
         self.top_panel = JPanel(FlowLayout(FlowLayout.LEFT))
@@ -255,14 +259,19 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
         )
 
         self.add(self.top_panel, BorderLayout.NORTH)
+        print("[IDOR] Top panel created and added")
 
         # Main Split Pane
         self.split_pane = JSplitPane(JSplitPane.HORIZONTAL_SPLIT)
         self.add(self.split_pane, BorderLayout.CENTER)
+        print("[IDOR] Split pane created")
 
         # Left: Table
+        print("[IDOR] Creating table model...")
         self.table_model = IDORAttackTableModel()
+        print("[IDOR] Creating JTable...")
         self.table = JTable(self.table_model)
+        print("[IDOR] JTable created")
         self.table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION)
 
         # Add selection listener with explicit logging
@@ -295,10 +304,14 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
         self.split_pane.setRightComponent(self.details_split_pane)
 
         # Top Panel: Attack Request, Attack Response, Diff
+        print("[IDOR] Creating top tabs...")
         self.top_tabs = JTabbedPane()
 
+        print("[IDOR] Creating message editors...")
         self.request_editor = self.extender._callbacks.createMessageEditor(self, False)
+        print("[IDOR] Request editor created")
         self.response_editor = self.extender._callbacks.createMessageEditor(self, False)
+        print("[IDOR] Response editor created")
 
         self.diff_text = JTextArea()
         self.diff_text.setEditable(False)
@@ -338,6 +351,9 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
 
         self.split_pane.setDividerLocation(600)
         self.details_split_pane.setDividerLocation(300)
+
+        print("[IDOR] ========== IDORAttackPanel.__init__ COMPLETED ==========")
+        print("[IDOR] Panel fully initialized and ready")
 
     def setup_context_menu(self):
         """Setup right-click context menu for the table"""
@@ -385,7 +401,7 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
 
         if hasattr(self.extender, "db_manager"):
             self.extender.db_manager.execute_query(
-                "UPDATE attack_queue SET verified = 1 WHERE id = ?", (attack_id,)
+                "UPDATE attack_queue SET verified = 1 WHERE id = " + str(attack_id)
             )
             self.refresh_table()
 
@@ -400,7 +416,7 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
 
         if hasattr(self.extender, "db_manager"):
             self.extender.db_manager.execute_query(
-                "UPDATE attack_queue SET verified = 0 WHERE id = ?", (attack_id,)
+                "UPDATE attack_queue SET verified = 0 WHERE id = " + str(attack_id)
             )
             self.refresh_table()
 
@@ -726,15 +742,12 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
             print("[IDOR] Fetching details for Attack ID: " + str(attack_id))
 
             # Fetch details
-            sql = "SELECT request_data, response_data, original_request_id, payload_description, llm_verification_result FROM attack_queue WHERE id = ?"
-            print(
-                "[IDOR] Executing SQL: "
-                + sql
-                + " with params: ("
+            sql = (
+                "SELECT request_data, response_data, original_request_id, payload_description, llm_verification_result FROM attack_queue WHERE id = "
                 + str(attack_id)
-                + ",)"
             )
-            rows = self.extender.db_manager.fetch_all(sql, (attack_id,))
+            print("[IDOR] Executing SQL: " + sql)
+            rows = self.extender.db_manager.fetch_all(sql)
             print("[IDOR] Query returned {} rows".format(len(rows) if rows else 0))
 
             if rows and len(rows) > 0:
@@ -750,15 +763,14 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
 
                     # Get original request data for comparison
                     sql_orig_data = (
-                        "SELECT path, query_params, body FROM raw_requests WHERE id = ?"
+                        "SELECT path, query_params, body FROM raw_requests WHERE id = "
+                        + str(orig_req_id)
                     )
                     print(
                         "[IDOR] Fetching original request data for comparison, orig_req_id: "
                         + str(orig_req_id)
                     )
-                    orig_data_rows = self.extender.db_manager.fetch_all(
-                        sql_orig_data, (orig_req_id,)
-                    )
+                    orig_data_rows = self.extender.db_manager.fetch_all(sql_orig_data)
                     print(
                         "[IDOR] Original data query returned {} rows".format(
                             len(orig_data_rows) if orig_data_rows else 0
@@ -838,14 +850,11 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
 
                 # Original Request & Response
                 print("[IDOR] Fetching original req ID: " + str(orig_req_id))
-                sql_orig = "SELECT headers, body, method, url, response_headers, response_body FROM raw_requests WHERE id = ?"
-                print(
-                    "[IDOR] Executing SQL: "
-                    + sql_orig
-                    + " with params: ("
+                sql_orig = (
+                    "SELECT headers, body, method, url, response_headers, response_body FROM raw_requests WHERE id = "
                     + str(orig_req_id)
-                    + ",)"
                 )
+                print("[IDOR] Executing SQL: " + sql_orig)
                 orig_rows = self.extender.db_manager.fetch_all(sql_orig, (orig_req_id,))
                 print(
                     "[IDOR] Original request query returned {} rows".format(
@@ -966,9 +975,12 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
                             rd = json.loads(req_data_json)
 
                             # Fetch original request data
-                            sql_orig_data = "SELECT path, query_params, body FROM raw_requests WHERE id = ?"
+                            sql_orig_data = (
+                                "SELECT path, query_params, body FROM raw_requests WHERE id = "
+                                + str(orig_req_id)
+                            )
                             orig_data_rows = self.extender.db_manager.fetch_all(
-                                sql_orig_data, (orig_req_id,)
+                                sql_orig_data
                             )
                             if orig_data_rows:
                                 orig_path, orig_query_json, orig_body = orig_data_rows[

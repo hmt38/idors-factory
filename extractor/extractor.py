@@ -184,8 +184,8 @@ class ParameterExtractor:
 
                 # Mark as analyzed with timestamp
                 self.db_manager.execute_query(
-                    "UPDATE raw_requests SET is_analyzed = 1, analyzed_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (req_id,),
+                    "UPDATE raw_requests SET is_analyzed = 1, analyzed_at = CURRENT_TIMESTAMP WHERE id = "
+                    + str(req_id)
                 )
             except Exception as e:
                 print(
