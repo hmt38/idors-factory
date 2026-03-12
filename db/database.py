@@ -197,32 +197,38 @@ class DatabaseManager:
 
             # Fix for zxJDBC BLOB handling: Replace BLOB columns with CAST to TEXT
             # This prevents "not implemented" errors when fetching BLOB data
-            if USE_ZXJDBC and "BLOB" in query:
-                # Only replace specific known BLOB columns to preserve original behavior
-                query = query.replace(
-                    "request_data BLOB", "CAST(request_data AS TEXT) as request_data"
-                )
-                query = query.replace(
-                    "response_data BLOB", "CAST(response_data AS TEXT) as response_data"
-                )
-                # Also handle cases where BLOB is in table definition but we select without type
-                if "request_data" in query and "CAST(request_data" not in query:
-                    query = query.replace(
-                        "request_data,", "CAST(request_data AS TEXT) as request_data,"
-                    )
-                    query = query.replace(
-                        "request_data FROM",
-                        "CAST(request_data AS TEXT) as request_data FROM",
-                    )
-                if "response_data" in query and "CAST(response_data" not in query:
-                    query = query.replace(
-                        "response_data,",
-                        "CAST(response_data AS TEXT) as response_data,",
-                    )
-                    query = query.replace(
-                        "response_data FROM",
-                        "CAST(response_data AS TEXT) as response_data FROM",
-                    )
+            if USE_ZXJDBC:
+                # List of known BLOB columns that need CAST conversion
+                blob_columns = [
+                    "request_data",
+                    "response_data",
+                    "body",
+                    "response_body",
+                    "headers",
+                    "response_headers",
+                ]
+
+                # Check if query selects any BLOB columns without CAST
+                for col in blob_columns:
+                    # Match patterns like "body," "body FROM" "body WHERE" etc.
+                    if (
+                        col + "," in query
+                        or col + " FROM" in query
+                        or col + " WHERE" in query
+                    ):
+                        if "CAST(" + col + " AS" not in query:
+                            # Replace the column with CAST version
+                            query = query.replace(
+                                col + ",", "CAST(" + col + " AS TEXT) as " + col + ","
+                            )
+                            query = query.replace(
+                                col + " FROM",
+                                "CAST(" + col + " AS TEXT) as " + col + " FROM",
+                            )
+                            query = query.replace(
+                                col + " WHERE",
+                                "CAST(" + col + " AS TEXT) as " + col + " WHERE",
+                            )
 
             conn = self.get_connection()
             if not conn:

@@ -855,7 +855,7 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
                     + str(orig_req_id)
                 )
                 print("[IDOR] Executing SQL: " + sql_orig)
-                orig_rows = self.extender.db_manager.fetch_all(sql_orig, (orig_req_id,))
+                orig_rows = self.extender.db_manager.fetch_all(sql_orig)
                 print(
                     "[IDOR] Original request query returned {} rows".format(
                         len(orig_rows) if orig_rows else 0
