@@ -475,24 +475,19 @@ class AttackEngine:
             "body": new_body_str,
         }
 
+        request_data_json_str = json.dumps(request_data).replace("'", "''")
+        description_str = description.replace("'", "''")
+
         sql = """
         INSERT INTO attack_queue 
         (original_request_id, target_user, payload_description, request_data, status, vulnerability_score)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """
+        VALUES ({}, '{}', '{}', '{}', 'PENDING', {})
+        """.format(
+            req_id, target_user, description_str, request_data_json_str, risk_score
+        )
 
         try:
-            self.db_manager.execute_query(
-                sql,
-                (
-                    req_id,
-                    target_user,
-                    description,
-                    json.dumps(request_data),
-                    "PENDING",
-                    risk_score,
-                ),
-            )
+            self.db_manager.execute_query(sql)
             print("[Attacker] Queued attack: " + description)
         except Exception as e_ins:
             print("[Attacker] Error inserting attack: " + str(e_ins))
