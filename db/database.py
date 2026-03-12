@@ -198,37 +198,30 @@ class DatabaseManager:
             # Fix for zxJDBC BLOB handling: Replace BLOB columns with CAST to TEXT
             # This prevents "not implemented" errors when fetching BLOB data
             if USE_ZXJDBC:
-                # List of known BLOB columns that need CAST conversion
+                # List of known BLOB columns that need CAST conversion (only actual BLOB types)
+                # headers and response_headers are TEXT, not BLOB
                 blob_columns = [
-                    "request_data",
+                    "response_body",  # Check longer names first to avoid partial matches
                     "response_data",
+                    "request_data",
                     "body",
-                    "response_body",
-                    "headers",
-                    "response_headers",
                 ]
 
                 # Check if query selects any BLOB columns without CAST
+                import re
+
                 for col in blob_columns:
-                    # Match patterns like "body," "body FROM" "body WHERE" etc.
-                    if (
-                        col + "," in query
-                        or col + " FROM" in query
-                        or col + " WHERE" in query
-                    ):
-                        if "CAST(" + col + " AS" not in query:
-                            # Replace the column with CAST version
-                            query = query.replace(
-                                col + ",", "CAST(" + col + " AS TEXT) as " + col + ","
-                            )
-                            query = query.replace(
-                                col + " FROM",
-                                "CAST(" + col + " AS TEXT) as " + col + " FROM",
-                            )
-                            query = query.replace(
-                                col + " WHERE",
-                                "CAST(" + col + " AS TEXT) as " + col + " WHERE",
-                            )
+                    # Use word boundary matching to avoid partial matches
+                    # Match: "body," or "body FROM" or "body WHERE" but not "response_body"
+                    # Pattern: word boundary + column name + (comma or space or end)
+                    pattern = r"\b" + re.escape(col) + r"\b"
+                    if re.search(pattern, query) and "CAST(" + col not in query:
+                        # Replace with CAST version, preserving what comes after
+                        query = re.sub(
+                            r"\b" + re.escape(col) + r"\b",
+                            "CAST(" + col + " AS TEXT) as " + col,
+                            query,
+                        )
 
             conn = self.get_connection()
             if not conn:
