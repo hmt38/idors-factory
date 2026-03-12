@@ -195,6 +195,35 @@ class DatabaseManager:
             if params:
                 print("[DB] Query params: " + str(params))
 
+            # Fix for zxJDBC BLOB handling: Replace BLOB columns with CAST to TEXT
+            # This prevents "not implemented" errors when fetching BLOB data
+            if USE_ZXJDBC and "BLOB" in query:
+                # Only replace specific known BLOB columns to preserve original behavior
+                query = query.replace(
+                    "request_data BLOB", "CAST(request_data AS TEXT) as request_data"
+                )
+                query = query.replace(
+                    "response_data BLOB", "CAST(response_data AS TEXT) as response_data"
+                )
+                # Also handle cases where BLOB is in table definition but we select without type
+                if "request_data" in query and "CAST(request_data" not in query:
+                    query = query.replace(
+                        "request_data,", "CAST(request_data AS TEXT) as request_data,"
+                    )
+                    query = query.replace(
+                        "request_data FROM",
+                        "CAST(request_data AS TEXT) as request_data FROM",
+                    )
+                if "response_data" in query and "CAST(response_data" not in query:
+                    query = query.replace(
+                        "response_data,",
+                        "CAST(response_data AS TEXT) as response_data,",
+                    )
+                    query = query.replace(
+                        "response_data FROM",
+                        "CAST(response_data AS TEXT) as response_data FROM",
+                    )
+
             conn = self.get_connection()
             if not conn:
                 print("[DB] Failed to get connection")
@@ -269,14 +298,29 @@ class DatabaseManager:
 
             if "not implemented" in error_str or "java" in error_str:
                 try:
-                    # Fallback for drivers that don't support fetchall fully or correctly
-                    results = []
-                    # zxJDBC cursor is an iterator
-                    if cursor:
-                        for row in cursor:
+                    # Retry with BLOB columns cast to TEXT
+                    if USE_ZXJDBC:
+                        retry_query = query
+                        if "request_data" in retry_query:
+                            retry_query = retry_query.replace(
+                                "request_data", "CAST(request_data AS TEXT)"
+                            )
+                        if "response_data" in retry_query:
+                            retry_query = retry_query.replace(
+                                "response_data", "CAST(response_data AS TEXT)"
+                            )
+
+                        print("[DB] Retrying with CAST conversion...")
+                        cursor2 = conn.cursor()
+                        cursor2.execute(retry_query)
+                        results = []
+                        while True:
+                            row = cursor2.fetchone()
+                            if row is None:
+                                break
                             results.append(row)
-                    print("[DB] Fallback iteration got {} rows".format(len(results)))
-                    return results
+                        print("[DB] Retry fetched {} rows".format(len(results)))
+                        return results
                 except Exception as e2:
                     print("[DB] Error fetching data (fallback): " + str(e2))
                     import traceback
