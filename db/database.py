@@ -211,17 +211,35 @@ class DatabaseManager:
                 import re
 
                 for col in blob_columns:
-                    # Use word boundary matching to avoid partial matches
-                    # Match: "body," or "body FROM" or "body WHERE" but not "response_body"
-                    # Pattern: word boundary + column name + (comma or space or end)
-                    pattern = r"\b" + re.escape(col) + r"\b"
-                    if re.search(pattern, query) and "CAST(" + col not in query:
-                        # Replace with CAST version, preserving what comes after
-                        query = re.sub(
-                            r"\b" + re.escape(col) + r"\b",
-                            "CAST(" + col + " AS TEXT) as " + col,
-                            query,
+                    # Skip if already has CAST for this column
+                    if "CAST(" + col in query or "CAST(r." + col in query:
+                        continue
+
+                    # Pattern to match column with optional table prefix (e.g., "r.body" or "body")
+                    # Use negative lookbehind to avoid matching if preceded by word character (e.g., response_body)
+                    # Use word boundary at the end to ensure complete match
+                    pattern = r"(?<!\w)(\w+\.)?(" + re.escape(col) + r")\b"
+
+                    def replace_func(match):
+                        prefix = match.group(1) if match.group(1) else ""
+                        col_name = match.group(2)
+                        # Return: CAST(prefix+column AS TEXT) as column (without prefix in alias)
+                        return "CAST(" + prefix + col_name + " AS TEXT) as " + col_name
+
+                    # Only replace in SELECT clause (before FROM)
+                    # Split query at FROM to avoid replacing in subqueries
+                    if " FROM " in query.upper():
+                        parts = re.split(
+                            r"\bFROM\b", query, maxsplit=1, flags=re.IGNORECASE
                         )
+                        if len(parts) == 2:
+                            # Only replace in SELECT part
+                            parts[0] = re.sub(pattern, replace_func, parts[0])
+                            query = parts[0] + " FROM " + parts[1]
+                        else:
+                            query = re.sub(pattern, replace_func, query)
+                    else:
+                        query = re.sub(pattern, replace_func, query)
 
             conn = self.get_connection()
             if not conn:
