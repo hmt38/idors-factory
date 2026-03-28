@@ -535,6 +535,7 @@ class DatabaseManager:
                 cursor.execute("DELETE FROM attack_queue")
                 cursor.execute("DELETE FROM parameter_pool")
                 cursor.execute("DELETE FROM raw_requests")
+                cursor.execute("DELETE FROM api_metadata")
                 cursor.execute(
                     "DELETE FROM sqlite_sequence"
                 )  # Reset auto-increment counters

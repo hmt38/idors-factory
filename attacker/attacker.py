@@ -12,6 +12,22 @@ class AttackEngine:
         self.db_manager = db_manager
         self.llm_helper = None
 
+    def _get_blacklist_params(self):
+        try:
+            extender = getattr(self.db_manager, "extender", None)
+            if extender and hasattr(extender, "blacklistParams"):
+                blacklist_text = extender.blacklistParams.getText().strip()
+                if blacklist_text:
+                    return set(
+                        [p.strip() for p in blacklist_text.split(",") if p.strip()]
+                    )
+        except:
+            pass
+        return set()
+
+    def _is_blacklisted(self, param_name):
+        return param_name in self._get_blacklist_params()
+
     def _init_llm(self):
         try:
             extender = self.db_manager.extender
@@ -237,6 +253,9 @@ class AttackEngine:
         target_params = []  # List of dicts: {name, value, location, risk_score}
 
         for name, value, location in current_params:
+            if self._is_blacklisted(name):
+                continue
+
             # Query risk score from pool (assuming we have it stored)
             # If not found, default to 0.
             sql = "SELECT risk_score FROM parameter_pool WHERE api_signature = '{}' AND param_name = '{}' AND user_identifier = '{}'".format(
@@ -306,7 +325,11 @@ class AttackEngine:
                 continue
 
             # Convert to dictionary for easy lookup
-            other_params_map = {row[0]: row[1] for row in other_param_rows}
+            other_params_map = {
+                row[0]: row[1]
+                for row in other_param_rows
+                if not self._is_blacklisted(row[0])
+            }
 
             # Identify which parameters can be swapped
             swappable_params = []

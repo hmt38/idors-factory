@@ -271,7 +271,7 @@ class ConfigurationTab:
         )
         self._extender.blacklistParams = JTextField("limit,offset", 30)
         self._extender.blacklistParams.setToolTipText(
-            "Parameters in this list will not be extracted or replaced (exact match)"
+            "Parameters in this list will not be extracted or used for attack generation (exact match, takes effect immediately)"
         )
 
         # LLM Configuration UI

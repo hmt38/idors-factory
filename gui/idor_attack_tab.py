@@ -22,7 +22,7 @@ from javax.swing.table import (
     TableRowSorter,
 )
 from java.awt import BorderLayout, FlowLayout, Color, Dimension, Font
-from java.awt.event import ActionListener, MouseAdapter
+from java.awt.event import ActionListener, MouseAdapter, MouseMotionAdapter
 from burp import IMessageEditorController
 import json
 from java.util import ArrayList
@@ -188,10 +188,10 @@ class RiskRenderer(DefaultTableCellRenderer):
                     pass
 
             if is_sensitive:
-                fg_color = Color.RED
+                fg_color = Color(184, 134, 11)
                 if not isSelected:
                     # Make font bold for sensitive? Font handling is tricky in renderer reusing component.
-                    # Just stick to RED text.
+                    # Just stick to dark yellow text.
                     pass
 
             # Set Tooltip for Description (Column 7)
@@ -211,7 +211,7 @@ class RiskRenderer(DefaultTableCellRenderer):
                 c.setBackground(table.getSelectionBackground())
                 c.setForeground(table.getSelectionForeground())
                 if is_sensitive:
-                    c.setForeground(Color(255, 100, 100))
+                    c.setForeground(Color(218, 165, 32))
             else:
                 c.setBackground(bg_color)
                 c.setForeground(fg_color)
@@ -225,6 +225,49 @@ class RiskRenderer(DefaultTableCellRenderer):
 
 
 class IDORAttackPanel(JPanel, IMessageEditorController):
+    class TableTooltipMouseListener(MouseMotionAdapter):
+        def __init__(self, panel):
+            self.panel = panel
+
+        def mouseMoved(self, event):
+            table = self.panel.table
+            point = event.getPoint()
+            row = table.rowAtPoint(point)
+            col = table.columnAtPoint(point)
+
+            if row < 0 or col < 0:
+                table.setToolTipText(None)
+                return
+
+            model_row = table.convertRowIndexToModel(row)
+            model_col = table.convertColumnIndexToModel(col)
+            value = self.panel.table_model.getValueAt(model_row, model_col)
+
+            if model_col == 2 and value:
+                path_text = str(value)
+                if len(path_text) > 300:
+                    path_text = path_text[:300] + "..."
+                table.setToolTipText(
+                    '<html><div width="600" style="word-wrap: break-word; white-space: pre-wrap;"><b>Path Preview</b><br/>{}</div></html>'.format(
+                        path_text.replace("&", "&amp;")
+                        .replace("<", "&lt;")
+                        .replace(">", "&gt;")
+                        .replace('"', "&quot;")
+                    )
+                )
+            elif model_col == 7 and value:
+                description = str(value)
+                table.setToolTipText(
+                    '<html><p width="500">{}</p></html>'.format(
+                        description.replace("&", "&amp;")
+                        .replace("<", "&lt;")
+                        .replace(">", "&gt;")
+                        .replace("\n", "<br>")
+                    )
+                )
+            else:
+                table.setToolTipText(None)
+
     def __init__(self, extender):
         print("[IDOR] ========== IDORAttackPanel.__init__ CALLED ==========")
         print("[IDOR] Extender object: " + str(extender))
@@ -254,7 +297,7 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
         self.top_panel.add(self.btn_clear)
         self.top_panel.add(
             JLabel(
-                " | Sensitive APIs (POST/PUT/DELETE) are highlighted in RED and require manual execution."
+                " | Sensitive APIs (POST/PUT/DELETE) are highlighted in dark yellow and require manual execution."
             )
         )
 
@@ -289,6 +332,9 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
         for i in range(self.table.getColumnCount()):
             renderer = RiskRenderer(self.extender)
             self.table.getColumnModel().getColumn(i).setCellRenderer(renderer)
+
+        # Tooltip preview for Path and Description columns
+        self.table.addMouseMotionListener(self.TableTooltipMouseListener(self))
 
         # Set Tooltip for Description Column (Index 7)
         # Note: RiskRenderer needs to handle tooltip.
