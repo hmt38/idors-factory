@@ -87,9 +87,8 @@ class IDORAttackTableModel(AbstractTableModel):
 
 
 class RiskRenderer(DefaultTableCellRenderer):
-    def __init__(self, extender=None):
-        self.extender = extender
-        self.risk_cache = {}
+    def __init__(self, panel):
+        self.panel = panel
 
     def getTableCellRendererComponent(
         self, table, value, isSelected, hasFocus, row, column
@@ -108,18 +107,10 @@ class RiskRenderer(DefaultTableCellRenderer):
 
             # Check if verified (deep green background)
             attack_id = model.getValueAt(model_row, 0)
-            is_verified = False
-            if self.extender and hasattr(self.extender, "db_manager"):
-                try:
-                    rows = self.extender.db_manager.fetch_all(
-                        "SELECT verified FROM attack_queue WHERE id = " + str(attack_id)
-                    )
-                    if rows and rows[0][0]:
-                        is_verified = True
-                        bg_color = Color(0, 150, 0)  # Deep Green for verified
-                        fg_color = Color.WHITE
-                except:
-                    pass
+            is_verified = self.panel.is_attack_verified(attack_id)
+            if is_verified:
+                bg_color = Color(0, 150, 0)  # Deep Green for verified
+                fg_color = Color.WHITE
 
             # 1. Check for Status (Column 3) specific coloring (only if not verified)
             if not is_verified:
@@ -134,58 +125,7 @@ class RiskRenderer(DefaultTableCellRenderer):
             # 2. Check for Sensitive API (Risk)
             method = model.getValueAt(model_row, 1)
             path = model.getValueAt(model_row, 2)
-
-            is_sensitive = False
-            if method in ["POST", "PUT", "DELETE", "PATCH"]:
-                is_sensitive = True
-            if path and any(
-                x in path.lower()
-                for x in [
-                    "delete",
-                    "remove",
-                    "update",
-                    "modify",
-                    "add",
-                    "create",
-                    "change",
-                ]
-            ):
-                is_sensitive = True
-
-            # Check LLM Risk via DB
-            if self.extender:
-                try:
-                    # We need to normalize path to match api_signature
-                    # Access extractor helper if possible
-                    api_sig = None
-                    if hasattr(self.extender, "extractor"):
-                        api_sig = self.extender.extractor._get_api_signature(
-                            method, path
-                        )
-
-                    if api_sig:
-                        if api_sig in self.risk_cache:
-                            if self.risk_cache[api_sig]:
-                                is_sensitive = True
-                        else:
-                            # Query DB
-                            if hasattr(self.extender, "db_manager"):
-                                rows = self.extender.db_manager.fetch_all(
-                                    "SELECT is_sensitive FROM api_metadata WHERE api_signature = '{}'".format(
-                                        api_sig.replace("'", "''")
-                                    )
-                                )
-                                if rows:
-                                    val = bool(rows[0][0])
-                                    self.risk_cache[api_sig] = val
-                                    if val:
-                                        is_sensitive = True
-                                else:
-                                    # Not analyzed yet
-                                    self.risk_cache[api_sig] = False
-                except Exception as e:
-                    # print("Error checking LLM risk: " + str(e))
-                    pass
+            is_sensitive = self.panel.is_sensitive_api(method, path)
 
             if is_sensitive:
                 fg_color = Color(184, 134, 11)
@@ -198,12 +138,17 @@ class RiskRenderer(DefaultTableCellRenderer):
             if column == 7:
                 description = model.getValueAt(model_row, 7)
                 if description:
-                    # Wrap in HTML for multiline tooltip if needed
-                    c.setToolTipText(
-                        '<html><p width="500">{}</p></html>'.format(
-                            description.replace("\n", "<br>")
-                        )
-                    )
+                    description = str(description)
+                    lower_description = description.lower()
+                    marker = "swap params"
+                    marker_pos = lower_description.find(marker)
+                    if marker_pos != -1:
+                        description = description[marker_pos:]
+                    if len(description) > 400:
+                        description = description[:400] + "..."
+                    c.setToolTipText(description)
+                else:
+                    c.setToolTipText(None)
             else:
                 c.setToolTipText(None)
 
@@ -229,6 +174,14 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
         def __init__(self, panel):
             self.panel = panel
 
+        def _escape_html(self, text):
+            return (
+                text.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace('"', "&quot;")
+            )
+
         def mouseMoved(self, event):
             table = self.panel.table
             point = event.getPoint()
@@ -247,23 +200,18 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
                 path_text = str(value)
                 if len(path_text) > 300:
                     path_text = path_text[:300] + "..."
-                table.setToolTipText(
-                    '<html><div width="600" style="word-wrap: break-word; white-space: pre-wrap;"><b>Path Preview</b><br/>{}</div></html>'.format(
-                        path_text.replace("&", "&amp;")
-                        .replace("<", "&lt;")
-                        .replace(">", "&gt;")
-                        .replace('"', "&quot;")
-                    )
-                )
+                table.setToolTipText(self._escape_html(path_text))
             elif model_col == 7 and value:
                 description = str(value)
+                lower_description = description.lower()
+                marker = "swap params"
+                marker_pos = lower_description.find(marker)
+                if marker_pos != -1:
+                    description = description[marker_pos:]
+                if len(description) > 400:
+                    description = description[:400] + "..."
                 table.setToolTipText(
-                    '<html><p width="500">{}</p></html>'.format(
-                        description.replace("&", "&amp;")
-                        .replace("<", "&lt;")
-                        .replace(">", "&gt;")
-                        .replace("\n", "<br>")
-                    )
+                    self._escape_html(description).replace("\n", " &#10; ")
                 )
             else:
                 table.setToolTipText(None)
@@ -330,7 +278,7 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
 
         # Renderer
         for i in range(self.table.getColumnCount()):
-            renderer = RiskRenderer(self.extender)
+            renderer = RiskRenderer(self)
             self.table.getColumnModel().getColumn(i).setCellRenderer(renderer)
 
         # Tooltip preview for Path and Description columns
@@ -394,12 +342,93 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
         self.current_original_request = None
         self.current_original_response = None
         self.current_http_service = None
+        self.verified_cache = {}
+        self.api_risk_cache = {}
 
         self.split_pane.setDividerLocation(600)
         self.details_split_pane.setDividerLocation(300)
 
         print("[IDOR] ========== IDORAttackPanel.__init__ COMPLETED ==========")
         print("[IDOR] Panel fully initialized and ready")
+
+    def _get_api_signature(self, method, path):
+        try:
+            if hasattr(self.extender, "extractor"):
+                return self.extender.extractor._get_api_signature(method, path)
+        except Exception:
+            pass
+        return None
+
+    def _preload_attack_metadata(self, rows):
+        self.verified_cache = {}
+        self.api_risk_cache = {}
+
+        if not rows:
+            return
+
+        api_signatures = set()
+        for row in rows:
+            attack_id = row[0]
+            method = row[1]
+            path = row[2]
+            verified = bool(row[8]) if len(row) > 8 else False
+            self.verified_cache[attack_id] = verified
+
+            api_sig = self._get_api_signature(method, path)
+            if api_sig:
+                api_signatures.add(api_sig)
+
+        if not api_signatures or not hasattr(self.extender, "db_manager"):
+            return
+
+        signatures_sql = ", ".join(
+            ["'{}'".format(sig.replace("'", "''")) for sig in api_signatures]
+        )
+        sql = (
+            "SELECT api_signature, is_sensitive FROM api_metadata WHERE api_signature IN ({})".format(
+                signatures_sql
+            )
+        )
+
+        try:
+            rows = self.extender.db_manager.fetch_all(sql)
+            for api_signature, is_sensitive in rows:
+                self.api_risk_cache[api_signature] = bool(is_sensitive)
+        except Exception:
+            pass
+
+        for api_signature in api_signatures:
+            if api_signature not in self.api_risk_cache:
+                self.api_risk_cache[api_signature] = False
+
+    def is_attack_verified(self, attack_id):
+        return self.verified_cache.get(attack_id, False)
+
+    def is_sensitive_api(self, method, path):
+        is_sensitive = False
+
+        if method in ["POST", "PUT", "DELETE", "PATCH"]:
+            is_sensitive = True
+
+        if path and any(
+            x in path.lower()
+            for x in [
+                "delete",
+                "remove",
+                "update",
+                "modify",
+                "add",
+                "create",
+                "change",
+            ]
+        ):
+            is_sensitive = True
+
+        api_sig = self._get_api_signature(method, path)
+        if api_sig and self.api_risk_cache.get(api_sig, False):
+            is_sensitive = True
+
+        return is_sensitive
 
     def setup_context_menu(self):
         """Setup right-click context menu for the table"""
@@ -412,6 +441,10 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
         unmark_verified_item = JMenuItem("Unmark Verified")
         unmark_verified_item.addActionListener(lambda e: self.unmark_verified())
         popup_menu.add(unmark_verified_item)
+
+        delete_item = JMenuItem("Delete")
+        delete_item.addActionListener(lambda e: self.delete_selected_attack())
+        popup_menu.add(delete_item)
 
         # Add mouse listener to show popup
         class PopupListener(MouseAdapter):
@@ -466,16 +499,45 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
             )
             self.refresh_table()
 
+    def delete_selected_attack(self):
+        """Delete selected attack from attack queue"""
+        selected_row = self.table.getSelectedRow()
+        if selected_row == -1:
+            return
+
+        model_row = self.table.convertRowIndexToModel(selected_row)
+        attack_id = self.table_model.getValueAt(model_row, 0)
+
+        if hasattr(self.extender, "db_manager"):
+            self.extender.db_manager.execute_query(
+                "DELETE FROM attack_queue WHERE id = " + str(attack_id)
+            )
+            self.refresh_table()
+
+            if self.table_model.getRowCount() == 0:
+                self.table.clearSelection()
+                self.diff_text.setText("")
+                self.request_editor.setMessage(None, True)
+                self.response_editor.setMessage(None, False)
+                self.original_request_editor.setMessage(None, True)
+                self.original_response_editor.setMessage(None, False)
+            else:
+                new_row = min(model_row, self.table_model.getRowCount() - 1)
+                view_row = self.table.convertRowIndexToView(new_row)
+                if view_row != -1:
+                    self.table.setRowSelectionInterval(view_row, view_row)
+
     def refresh_table(self, event=None):
         # Fetch attacks from DB including verified status
         sql = """
-        SELECT a.id, r.method, r.path, a.status, a.response_code, a.vulnerability_score, a.llm_verification_result, a.payload_description 
+        SELECT a.id, r.method, r.path, a.status, a.response_code, a.vulnerability_score, a.llm_verification_result, a.payload_description, a.verified
         FROM attack_queue a 
         JOIN raw_requests r ON a.original_request_id = r.id
         ORDER BY a.verified DESC, a.id DESC
         """
         if hasattr(self.extender, "db_manager"):
             rows = self.extender.db_manager.fetch_all(sql)
+            self._preload_attack_metadata(rows)
             self.table_model.set_attacks(rows)
 
     def generate_attacks(self, event):

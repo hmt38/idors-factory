@@ -310,7 +310,7 @@ class ConfigurationTab:
 
         self._extender.ignore304 = JCheckBox("Ignore 304/204 status code responses")
         self._extender.ignore304.setBounds(280, 5, 300, 30)
-        self._extender.ignore304.setSelected(True)
+        self._extender.ignore304.setSelected(False)
 
         self._extender.prevent304 = JCheckBox("Prevent 304 Not Modified status code")
         self._extender.prevent304.setBounds(280, 25, 300, 30)
