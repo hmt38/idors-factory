@@ -1280,11 +1280,28 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
 
             # Update HTTP Service (Host/Port)
             try:
-                rd = json.loads(req_data_json)
-                host = rd["host"]
-                self.current_http_service = self.extender._helpers.buildHttpService(
-                    host, 80, "http"
-                )  # Placeholder
+                sql_service = (
+                    "SELECT url FROM raw_requests WHERE id = " + str(orig_req_id)
+                )
+                service_rows = self.extender.db_manager.fetch_all(sql_service)
+                if service_rows and service_rows[0][0]:
+                    from java.net import URL
+
+                    parsed_url = URL(service_rows[0][0])
+                    host = parsed_url.getHost()
+                    protocol = parsed_url.getProtocol()
+                    port = parsed_url.getPort()
+                    if port == -1:
+                        port = 443 if protocol.lower() == "https" else 80
+                    self.current_http_service = self.extender._helpers.buildHttpService(
+                        host, port, protocol
+                    )
+                else:
+                    rd = json.loads(req_data_json)
+                    host = rd["host"]
+                    self.current_http_service = self.extender._helpers.buildHttpService(
+                        host, 80, "http"
+                    )
             except:
                 pass
 

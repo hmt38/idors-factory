@@ -793,7 +793,7 @@ class AttackEngine:
 
         # 5. Process Response
         response_code = 0
-        response_data = ""
+        response_data = None
 
         if response_bytes:
             response_info = helpers.analyzeResponse(response_bytes)
@@ -806,11 +806,15 @@ class AttackEngine:
                 except:
                     pass
 
-            response_data = helpers.bytesToString(response_bytes)
+            response_data = response_bytes
 
         # 6. LLM Verification
         llm_result_str = "PENDING"
         status = "SENT"
+        attack_request_text = helpers.bytesToString(new_request_bytes)
+        attack_response_text = (
+            helpers.bytesToString(response_bytes) if response_bytes else ""
+        )
 
         if 200 <= response_code < 300:
             # Only check if successful
@@ -821,23 +825,35 @@ class AttackEngine:
 
                 # Fetch original request string
                 orig_req_sql = (
-                    "SELECT method, url, headers, body FROM raw_requests WHERE id = "
+                    "SELECT method, url, headers, body, response_headers, response_body FROM raw_requests WHERE id = "
                     + str(original_req_id)
                 )
                 orig_rows = self.db_manager.fetch_all(orig_req_sql)
                 orig_req_str = ""
+                orig_res_str = "Not Available"
                 if orig_rows:
-                    m, u, h_json, b = orig_rows[0]
+                    m, u, h_json, b, res_h_json, res_b = orig_rows[0]
                     orig_req_str = "{} {}\n{}\n\n{}".format(
-                        m, u, "\n".join(json.loads(h_json)), b
+                        m, u, "\n".join(json.loads(h_json)), b if b else ""
                     )
+                    if res_h_json:
+                        try:
+                            response_headers = "\n".join(json.loads(res_h_json))
+                            response_body = (
+                                helpers.bytesToString(res_b) if res_b else ""
+                            )
+                            orig_res_str = "{}\n\n{}".format(
+                                response_headers, response_body
+                            )
+                        except:
+                            orig_res_str = helpers.bytesToString(res_b) if res_b else ""
 
                 print("[Attacker] Calling LLM for verification...")
                 llm_res = llm.analyze_idor_vulnerability(
                     orig_req_str,
-                    "Not Available",
-                    helpers.bytesToString(new_request_bytes),
-                    response_data,
+                    orig_res_str,
+                    attack_request_text,
+                    attack_response_text,
                 )
                 llm_result_str = json.dumps(llm_res)
 
@@ -854,17 +870,21 @@ class AttackEngine:
             status = "FAILED"  # Non-2xx
 
         # 7. Update DB
+        response_data_sql = ""
+        if response_data:
+            if isinstance(response_data, unicode):
+                response_data_sql = response_data.encode("utf-8")
+            else:
+                response_data_sql = response_data
+
         update_sql = """
         UPDATE attack_queue 
-        SET status = '{}', response_data = '{}', response_code = {}, llm_verification_result = '{}'
-        WHERE id = {}
-        """.format(
-            status,
-            response_data.replace("'", "''"),
-            response_code,
-            llm_result_str.replace("'", "''"),
-            attack_id,
+        SET status = ?, response_data = ?, response_code = ?, llm_verification_result = ?
+        WHERE id = ?
+        """
+        self.db_manager.execute_query(
+            update_sql,
+            (status, response_data_sql, response_code, llm_result_str, attack_id),
         )
-        self.db_manager.execute_query(update_sql)
 
         return {"id": attack_id, "status": status, "code": response_code}
