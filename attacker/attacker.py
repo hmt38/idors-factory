@@ -734,6 +734,70 @@ class AttackEngine:
 
         return helpers.buildHttpMessage(headers_list, body)
 
+    def execute_pending_get_attacks(self, callbacks, helpers, llm_config=None, limit=50):
+        """
+        Execute pending GET attacks only. Used by both manual batch execution
+        and scheduled automation to avoid mutating APIs.
+        """
+        sql = """
+        SELECT a.id, r.method
+        FROM attack_queue a
+        JOIN raw_requests r ON a.original_request_id = r.id
+        WHERE a.status = 'PENDING' AND r.method = 'GET'
+        ORDER BY a.vulnerability_score DESC
+        LIMIT {}
+        """.format(int(limit))
+        attacks = self.db_manager.fetch_all(sql)
+
+        summary = {
+            "total": len(attacks) if attacks else 0,
+            "success": 0,
+            "failed": 0,
+            "vulnerable": 0,
+            "results": [],
+        }
+
+        if not attacks:
+            print("[Batch Attack] No PENDING GET attacks found.")
+            return summary
+
+        print(
+            "[Batch Attack] Found {} PENDING GET attacks to execute (limit {}).".format(
+                len(attacks), limit
+            )
+        )
+
+        for attack_row in attacks:
+            attack_id = attack_row[0]
+            try:
+                result = self.execute_attack(attack_id, callbacks, helpers, llm_config)
+                if result:
+                    summary["success"] += 1
+                    if result.get("status") == "VULNERABLE":
+                        summary["vulnerable"] += 1
+                    summary["results"].append(result)
+                    print(
+                        "[Batch Attack] Executed attack ID: {} - Status: {}".format(
+                            attack_id, result.get("status", "UNKNOWN")
+                        )
+                    )
+                else:
+                    summary["failed"] += 1
+                    print(
+                        "[Batch Attack] Failed to execute attack ID: {}".format(
+                            attack_id
+                        )
+                    )
+            except Exception as e:
+                summary["failed"] += 1
+                print(
+                    "[Batch Attack] Error executing attack {}: {}".format(
+                        attack_id, str(e)
+                    )
+                )
+
+        return summary
+
     def execute_attack(self, attack_id, callbacks, helpers, llm_config=None):
         from java.util import ArrayList
         from helpers.llm_helper import LLMHelper

@@ -680,32 +680,6 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
                 print("[Batch Attack] Attack engine or DB manager not initialized.")
                 return
 
-            # 1. Fetch all GET attacks with PENDING status
-            sql = """
-            SELECT a.id, r.method 
-            FROM attack_queue a 
-            JOIN raw_requests r ON a.original_request_id = r.id
-            WHERE a.status = 'PENDING' AND r.method = 'GET'
-            ORDER BY a.vulnerability_score DESC
-            """
-            attacks = self.extender.db_manager.fetch_all(sql)
-
-            if not attacks:
-                print("[Batch Attack] No PENDING GET attacks found.")
-                if hasattr(self.extender, "progressBar"):
-                    SwingUtilities.invokeLater(
-                        lambda: self.extender.progressBar.setString(
-                            "No GET attacks to execute"
-                        )
-                    )
-                    SwingUtilities.invokeLater(
-                        lambda: self.extender.progressBar.setStringPainted(True)
-                    )
-                return
-
-            total = len(attacks)
-            print("[Batch Attack] Found {} GET attacks to execute.".format(total))
-
             # Prepare LLM config
             llm_config = {
                 "enabled": self.extender.enableLlm.isSelected()
@@ -725,76 +699,50 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
                 else False,
             }
 
-            # 2. Execute attacks one by one
-            success_count = 0
-            failed_count = 0
-            vulnerable_count = 0
-
-            for idx, attack_row in enumerate(attacks):
-                attack_id = attack_row[0]
-
-                # Update progress bar
-                progress = int((idx + 1) * 100.0 / total)
-                if hasattr(self.extender, "progressBar"):
-
-                    def update_progress(p=progress, i=idx + 1, t=total, aid=attack_id):
-                        self.extender.progressBar.setIndeterminate(False)
-                        self.extender.progressBar.setString(
-                            "Executing GET Attacks: {}/{} ({}%) - ID: {}".format(
-                                i, t, p, aid
-                            )
-                        )
-                        self.extender.progressBar.setStringPainted(True)
-
-                    SwingUtilities.invokeLater(update_progress)
-
-                # Execute attack
-                try:
-                    result = self.extender.attack_engine.execute_attack(
-                        attack_id,
-                        self.extender._callbacks,
-                        self.extender._helpers,
-                        llm_config,
-                    )
-
-                    if result:
-                        success_count += 1
-                        if result.get("status") == "VULNERABLE":
-                            vulnerable_count += 1
-                        print(
-                            "[Batch Attack] Executed attack ID: {} - Status: {}".format(
-                                attack_id, result.get("status", "UNKNOWN")
-                            )
-                        )
-                    else:
-                        failed_count += 1
-                        print(
-                            "[Batch Attack] Failed to execute attack ID: {}".format(
-                                attack_id
-                            )
-                        )
-
-                except Exception as e:
-                    failed_count += 1
-                    print(
-                        "[Batch Attack] Error executing attack {}: {}".format(
-                            attack_id, str(e)
-                        )
-                    )
-
-            # 3. Show completion message
-            summary = "Batch Attack Complete: {}/{} executed, {} vulnerable, {} failed".format(
-                success_count, total, vulnerable_count, failed_count
-            )
-            print("[Batch Attack] " + summary)
-
             if hasattr(self.extender, "progressBar"):
                 SwingUtilities.invokeLater(
-                    lambda s=summary: self.extender.progressBar.setString(s)
+                    lambda: self.extender.progressBar.setIndeterminate(True)
+                )
+                SwingUtilities.invokeLater(
+                    lambda: self.extender.progressBar.setString(
+                        "Executing up to 50 GET attacks..."
+                    )
+                )
+                SwingUtilities.invokeLater(
+                    lambda: self.extender.progressBar.setStringPainted(True)
                 )
 
-            # 4. Refresh table
-            SwingUtilities.invokeLater(lambda: self.refresh_table())
+            try:
+                summary_data = self.extender.attack_engine.execute_pending_get_attacks(
+                    self.extender._callbacks,
+                    self.extender._helpers,
+                    llm_config,
+                    50,
+                )
+                total = summary_data.get("total", 0)
+                success_count = summary_data.get("success", 0)
+                vulnerable_count = summary_data.get("vulnerable", 0)
+                failed_count = summary_data.get("failed", 0)
+
+                if total == 0:
+                    summary = "No GET attacks to execute"
+                else:
+                    summary = "Batch Attack Complete: {}/{} executed, {} vulnerable, {} failed".format(
+                        success_count, total, vulnerable_count, failed_count
+                    )
+
+                print("[Batch Attack] " + summary)
+
+                if hasattr(self.extender, "progressBar"):
+                    SwingUtilities.invokeLater(
+                        lambda s=summary: self.extender.progressBar.setIndeterminate(False)
+                    )
+                    SwingUtilities.invokeLater(
+                        lambda s=summary: self.extender.progressBar.setString(s)
+                    )
+            finally:
+                # Refresh table
+                SwingUtilities.invokeLater(lambda: self.refresh_table())
 
         # Run in background thread
         t = Thread(target=run)

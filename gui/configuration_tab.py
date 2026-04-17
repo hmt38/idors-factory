@@ -265,6 +265,12 @@ class ConfigurationTab:
             "Generate attack payloads based on parameter differences"
         )
 
+        self._extender.autoIdorEnabled = JCheckBox(
+            "Enable Auto IDOR (5 min)", actionPerformed=self.toggleAutoIdor
+        )
+        self._extender.autoIdorEnabled.setSelected(False)
+        self._extender.autoIdorStatus = JLabel("Auto IDOR: disabled")
+
         # Blacklist Parameters Configuration
         self._extender.blacklistParamsLabel = JLabel(
             "Blacklist Params (comma-separated):"
@@ -387,6 +393,8 @@ class ConfigurationTab:
                     GroupLayout.PREFERRED_SIZE,
                     GroupLayout.PREFERRED_SIZE,
                 )
+                .addComponent(self._extender.autoIdorEnabled)
+                .addComponent(self._extender.autoIdorStatus)
                 .addGroup(
                     layout.createSequentialGroup()
                     .addComponent(self._extender.blacklistParamsLabel)
@@ -589,6 +597,11 @@ class ConfigurationTab:
             )
             .addGroup(
                 layout.createParallelGroup(GroupLayout.Alignment.BASELINE)
+                .addComponent(self._extender.autoIdorEnabled)
+                .addComponent(self._extender.autoIdorStatus)
+            )
+            .addGroup(
+                layout.createParallelGroup(GroupLayout.Alignment.BASELINE)
                 .addComponent(self._extender.blacklistParamsLabel)
                 .addComponent(
                     self._extender.blacklistParams,
@@ -689,6 +702,11 @@ class ConfigurationTab:
 
     def generateAttacks(self, event):
         self._extender.executor.submit(RunAttackerRunnable(self._extender))
+
+    def toggleAutoIdor(self, event):
+        enabled = self._extender.autoIdorEnabled.isSelected()
+        if hasattr(self._extender, "toggle_auto_idor"):
+            self._extender.toggle_auto_idor(enabled)
 
     def testLlm(self, event):
         self._extender.executor.submit(TestLLMRunnable(self._extender))
