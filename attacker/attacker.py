@@ -542,11 +542,22 @@ class AttackEngine:
     def _extract_params_from_request(self, path, query_params_json, body):
         params = []  # (name, value, location)
 
-        # Path
+        # Path - use the same semantic naming strategy as extractor
         parts = path.split("/")
         for i, part in enumerate(parts):
-            if self._is_numeric(part) or self._is_uuid(part):
-                params.append(("path_seg_" + str(i), part, "PATH"))
+            param_type = None
+            if self._is_numeric(part):
+                param_type = "id"
+            elif self._is_uuid(part):
+                param_type = "uuid"
+            else:
+                hash_type = self._is_hash(part)
+                if hash_type:
+                    param_type = hash_type
+
+            if param_type:
+                param_name = self._generate_path_param_name(parts, i, param_type)
+                params.append((param_name, part, "PATH"))
 
         # Query
         if query_params_json:
@@ -612,6 +623,31 @@ class AttackEngine:
             )
         except Exception as e:
             print("[Attacker] Error identifying API risk: " + str(e))
+
+    def _generate_path_param_name(self, parts, index, param_type):
+        """
+        Keep PATH parameter naming consistent with extractor._generate_param_name
+        so parameter_pool lookup and cross-user matching work correctly.
+        """
+        prefix = "unknown"
+        for j in range(index - 1, -1, -1):
+            if parts[j] and not self._is_param_like(parts[j]):
+                prefix = parts[j]
+                break
+
+        import re
+
+        prefix = re.sub(r"[^a-zA-Z0-9_]", "_", prefix)
+        prefix = prefix.strip("_").lower()
+        if not prefix:
+            prefix = "unknown"
+
+        return "{}_id".format(prefix)
+
+    def _is_param_like(self, s):
+        if not s:
+            return False
+        return self._is_numeric(s) or self._is_uuid(s) or bool(self._is_hash(s))
 
     def _generate_api_signature(self, method, host, path):
         # Same heuristic as extractor

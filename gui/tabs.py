@@ -377,8 +377,11 @@ class UserMessageEditor(IMessageEditorController):
 
     def getRequest(self):
         user_data = self._extender._currentlyDisplayedItem.get_user_enforcement(self._user_id)
-        if user_data and user_data['requestResponse']:
-            return user_data['requestResponse'].getRequest()
+        if user_data:
+            if user_data.get('requestBytes'):
+                return user_data['requestBytes']
+            if user_data.get('requestResponse'):
+                return user_data['requestResponse'].getRequest()
         return self._extender._currentlyDisplayedItem._originalrequestResponse.getRequest()
 
     def getResponse(self):

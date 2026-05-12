@@ -113,11 +113,12 @@ class SaveRestore():
                     for user_id in logEntry.get_all_users():
                         user_enforcement = logEntry.get_user_enforcement(user_id)
                         if user_enforcement and user_enforcement['requestResponse']:
+                            user_request_bytes = user_enforcement.get('requestBytes') or user_enforcement['requestResponse'].getRequest()
                             user_data_json[str(user_id)] = {
                                 'host': user_enforcement['requestResponse'].getHttpService().getHost(),
                                 'port': user_enforcement['requestResponse'].getHttpService().getPort(),
                                 'protocol': user_enforcement['requestResponse'].getHttpService().getProtocol(),
-                                'request': base64.b64encode(user_enforcement['requestResponse'].getRequest()),
+                                'request': base64.b64encode(user_request_bytes),
                                 'response': base64.b64encode(user_enforcement['requestResponse'].getResponse()),
                                 'status': user_enforcement['enforcementStatus']
                             }
@@ -190,7 +191,18 @@ class SaveRestore():
                                 user_data['mr_instance'].badProgrammerMRModel.clear()
                                 user_data['mr_instance'].MRModel.clear()
                                 for key, value in config['mr_rules'].items():
-                                    user_data['mr_instance'].badProgrammerMRModel[key] = value
+                                    restored_value = dict(value) if isinstance(value, dict) else value
+                                    if isinstance(restored_value, dict):
+                                        rule_type = restored_value.get('type', '')
+                                        match = restored_value.get('match', '')
+                                        if '(regex)' in rule_type and match:
+                                            try:
+                                                restored_value['regexMatch'] = re.compile(match)
+                                            except re.error:
+                                                restored_value['regexMatch'] = None
+                                        else:
+                                            restored_value['regexMatch'] = None
+                                    user_data['mr_instance'].badProgrammerMRModel[key] = restored_value
                                     user_data['mr_instance'].MRModel.addElement(key)
                         continue
 

@@ -303,7 +303,8 @@ class Table(JTable):
             for user_id, viewer in self._extender.user_viewers.items():
                 user_data = logEntry.get_user_enforcement(user_id)
                 if user_data and user_data['requestResponse']:
-                    viewer['requestViewer'].setMessage(user_data['requestResponse'].getRequest(), True)
+                    request_bytes = user_data.get('requestBytes') or user_data['requestResponse'].getRequest()
+                    viewer['requestViewer'].setMessage(request_bytes, True)
                     viewer['responseViewer'].setMessage(user_data['requestResponse'].getResponse(), False)
                 else:
                     viewer['requestViewer'].setMessage("No data for this user", True)
@@ -457,10 +458,11 @@ class LogEntry:
         
         self._userEnforcements = {}
         
-    def add_user_enforcement(self, user_id, requestResponse, enforcementStatus):
+    def add_user_enforcement(self, user_id, requestResponse, enforcementStatus, requestBytes=None):
         self._userEnforcements[user_id] = {
             'requestResponse': requestResponse,
-            'enforcementStatus': enforcementStatus
+            'enforcementStatus': enforcementStatus,
+            'requestBytes': requestBytes,
         }
     
     def get_user_enforcement(self, user_id):

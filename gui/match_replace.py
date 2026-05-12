@@ -35,6 +35,7 @@ class MatchReplace():
         column3X = column2X + editWidth + padding
         MRStrings = ["Headers (simple string):",
                      "Headers (regex):",
+                     "Header Add/Set:",
                      "Body (simple string):",
                      "Body (regex):",
                      "Path (simple string):",
@@ -266,8 +267,17 @@ class MatchReplace():
 
     def addMRFilter(self, event):
         typeName = self._extender.MRType.getSelectedItem()
-        match = self._extender.MText.getText()
+        match = self._extender.MText.getText().strip()
         replace = self._extender.RText.getText()
+
+        if typeName != "Header Add/Set:" and not match:
+            self._extender.MRFeedback.setText("ERROR: Match cannot be empty")
+            return
+
+        if typeName == "Header Add/Set:" and (not match or ":" in match or "\n" in match):
+            self._extender.MRFeedback.setText("ERROR: Header name is invalid")
+            return
+
         key = typeName + " " + match + "->" + replace
         if key in self._extender.badProgrammerMRModel:
             self._extender.MRFeedback.setText("Match/Replace already exists")

@@ -11,7 +11,7 @@ from javax.swing import JSplitPane
 from javax.swing import JCheckBox
 from javax.swing import JButton
 from javax.swing import JPanel, JProgressBar
-from java.awt import Dimension, BorderLayout
+from java.awt import Dimension, BorderLayout, Color
 
 from table import UpdateTableEDT
 
@@ -270,6 +270,10 @@ class ConfigurationTab:
         )
         self._extender.autoIdorEnabled.setSelected(False)
         self._extender.autoIdorStatus = JLabel("Auto IDOR: disabled")
+        self._extender.autoIdorStatus.setForeground(Color.GRAY)
+        self._extender.autoIdorStatus.setToolTipText(
+            "Current auto IDOR scheduler status"
+        )
 
         # Blacklist Parameters Configuration
         self._extender.blacklistParamsLabel = JLabel(
@@ -393,8 +397,18 @@ class ConfigurationTab:
                     GroupLayout.PREFERRED_SIZE,
                     GroupLayout.PREFERRED_SIZE,
                 )
-                .addComponent(self._extender.autoIdorEnabled)
-                .addComponent(self._extender.autoIdorStatus)
+                .addComponent(
+                    self._extender.autoIdorEnabled,
+                    GroupLayout.PREFERRED_SIZE,
+                    GroupLayout.PREFERRED_SIZE,
+                    GroupLayout.PREFERRED_SIZE,
+                )
+                .addComponent(
+                    self._extender.autoIdorStatus,
+                    GroupLayout.PREFERRED_SIZE,
+                    GroupLayout.PREFERRED_SIZE,
+                    GroupLayout.PREFERRED_SIZE,
+                )
                 .addGroup(
                     layout.createSequentialGroup()
                     .addComponent(self._extender.blacklistParamsLabel)
@@ -598,6 +612,9 @@ class ConfigurationTab:
             .addGroup(
                 layout.createParallelGroup(GroupLayout.Alignment.BASELINE)
                 .addComponent(self._extender.autoIdorEnabled)
+            )
+            .addGroup(
+                layout.createParallelGroup(GroupLayout.Alignment.BASELINE)
                 .addComponent(self._extender.autoIdorStatus)
             )
             .addGroup(

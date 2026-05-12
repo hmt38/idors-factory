@@ -399,8 +399,51 @@ def checkAuthorizationAllUsers(self, messageInfo, checkUnauthorized=True):
         mr_instance = user_data['mr_instance']
         headers_instance = user_data['headers_instance']
         user_headers_text = headers_instance.replaceString.getText()
+        mr_model = _get_mr_model(mr_instance)
+        mr_rule_count = mr_model.getSize() if mr_model else 0
+
+        print(
+            "[Autorize] Building user request for {} with {} match/replace rules".format(
+                user_name, mr_rule_count
+            )
+        )
+
+        isolated_rule_count = _get_isolated_mr_rule_count(mr_instance)
+        if isolated_rule_count != mr_rule_count:
+            print(
+                "[Autorize] MR model mismatch for {} => public: {} | isolated: {}".format(
+                    user_name, mr_rule_count, isolated_rule_count
+                )
+            )
 
         message = makeUserMessage(self, messageInfo, True, True, mr_instance, user_headers_text)
+
+        header_add_set_rules = []
+        if mr_model:
+            for i in range(mr_model.getSize()):
+                rule_key = mr_model.getElementAt(i)
+                rule_data = _get_rule_data(mr_instance, rule_key)
+                if rule_data and rule_data.get('type') == "Header Add/Set:":
+                    header_add_set_rules.append(rule_data.get('match', '').strip())
+
+        if header_add_set_rules:
+            built_headers = list(self._helpers.analyzeRequest(message).getHeaders())
+            present_headers = []
+            missing_headers = []
+            for header_name in header_add_set_rules:
+                header_prefix = header_name.lower() + ":"
+                if any(h.lower().startswith(header_prefix) for h in built_headers[1:]):
+                    present_headers.append(header_name)
+                else:
+                    missing_headers.append(header_name)
+            print(
+                "[Autorize] Header Add/Set check for {} => present: {} | missing: {}".format(
+                    user_name,
+                    ", ".join(present_headers) if present_headers else "-",
+                    ", ".join(missing_headers) if missing_headers else "-"
+                )
+            )
+
         requestResponse = makeRequest(self, messageInfo, message)
 
         if requestResponse and requestResponse.getResponse():
@@ -423,7 +466,7 @@ def checkAuthorizationAllUsers(self, messageInfo, checkUnauthorized=True):
                                                EDFilters, requestResponse, ed_instance.AndOrType.getSelectedItem())
 
                         savedRequestResponse = self._callbacks.saveBuffersToTempFiles(requestResponse)
-                        logEntry.add_user_enforcement(user_id, savedRequestResponse, impression)
+                        logEntry.add_user_enforcement(user_id, savedRequestResponse, impression, message)
             except (IndexError, Exception) as e:
                 pass
         else:
@@ -441,10 +484,103 @@ def checkAuthorizationAllUsers(self, messageInfo, checkUnauthorized=True):
     finally:
         self._lock.release()
 
+def _get_rule_data(mr_instance, rule_key):
+    rule_store = _get_rule_store(mr_instance)
+    if rule_store is None:
+        return None
+
+    rule_data = rule_store.get(rule_key)
+    if rule_data is not None:
+        return rule_data
+
+    try:
+        rule_key_str = str(rule_key)
+    except Exception:
+        rule_key_str = rule_key
+
+    return rule_store.get(rule_key_str)
+
+def _get_rule_store(mr_instance):
+    rule_store = getattr(mr_instance, 'badProgrammerMRModel', None)
+    if rule_store:
+        return rule_store
+
+    isolated = getattr(mr_instance, 'isolated_extender', None)
+    if isolated is not None:
+        return getattr(isolated, 'badProgrammerMRModel', None)
+
+    return None
+
+def _get_mr_model(mr_instance):
+    isolated = getattr(mr_instance, 'isolated_extender', None)
+    if isolated is not None:
+        isolated_model = getattr(isolated, 'MRModel', None)
+        if isolated_model is not None and getattr(isolated_model, 'getSize', None):
+            return isolated_model
+
+    mr_model = getattr(mr_instance, 'MRModel', None)
+    if mr_model is not None and getattr(mr_model, 'getSize', None):
+        return mr_model
+
+    return None
+
+def _get_isolated_mr_rule_count(mr_instance):
+    isolated = getattr(mr_instance, 'isolated_extender', None)
+    if isolated is None:
+        return 0
+
+    isolated_model = getattr(isolated, 'MRModel', None)
+    if isolated_model is None or not getattr(isolated_model, 'getSize', None):
+        return 0
+
+    return isolated_model.getSize()
+
 def makeUserMessage(self, messageInfo, removeOrNot, authorizeOrNot, mr_instance, user_headers_text=""):
     requestInfo = self._helpers.analyzeRequest(messageInfo)
     headers = list(requestInfo.getHeaders())
-    
+    mr_model = _get_mr_model(mr_instance)
+
+    def parse_header_lines(header_text):
+        parsed = []
+        if not header_text:
+            return parsed
+
+        for line in header_text.split('\n'):
+            line = line.strip()
+            if not line or ':' not in line:
+                continue
+            name, value = line.split(':', 1)
+            name = name.strip()
+            value = value.strip()
+            if name:
+                parsed.append((name, value))
+        return parsed
+
+    def upsert_header(header_lines, header_name, header_value):
+        if not header_name:
+            return header_lines
+
+        updated = []
+        replaced = False
+        target_name = header_name.lower()
+
+        for line in header_lines:
+            if ':' in line:
+                current_name = line.split(':', 1)[0].strip().lower()
+                if current_name == target_name:
+                    if not replaced:
+                        updated.append("{}: {}".format(header_name, header_value))
+                        replaced = True
+                    continue
+            updated.append(line)
+
+        if not replaced:
+            updated.append("{}: {}".format(header_name, header_value))
+
+        return updated
+
+    user_header_pairs = parse_header_lines(user_headers_text)
+
     if removeOrNot:
         queryFlag = self.replaceQueryParam.isSelected()
 
@@ -458,76 +594,81 @@ def makeUserMessage(self, messageInfo, removeOrNot, authorizeOrNot, mr_instance,
                     patchedHeader = re.sub(pattern, r"\1{}={}".format(paramKey, paramValue), headers[0], count=1, flags=re.DOTALL)
                     headers[0] = patchedHeader
         else:
-            if user_headers_text:
-                removeHeadersList = user_headers_text.split('\n')
-                removeHeaderNames = [header.split(':')[0].strip() + ':' for header in removeHeadersList if ':' in header]
-                
+            if user_header_pairs:
+                removeHeaderNames = [name.lower() + ':' for name, value in user_header_pairs]
+
                 headers_to_remove = []
                 for header in headers[1:]:
                     for removeHeader in removeHeaderNames:
-                        if header.lower().startswith(removeHeader.lower()):
+                        if header.lower().startswith(removeHeader):
                             headers_to_remove.append(header)
-                
+
                 for header in headers_to_remove:
                     if header in headers:
                         headers.remove(header)
 
         if authorizeOrNot:
-            for i in range(mr_instance.MRModel.getSize()):
-                rule_key = mr_instance.MRModel.getElementAt(i)
-                rule_data = mr_instance.badProgrammerMRModel.get(rule_key)
-                
+            if not queryFlag and user_header_pairs:
+                for name, value in user_header_pairs:
+                    headers = [headers[0]] + upsert_header(headers[1:], name, value)
+
+            for i in range(mr_model.getSize() if mr_model else 0):
+                rule_key = mr_model.getElementAt(i)
+                rule_data = _get_rule_data(mr_instance, rule_key)
+
                 if rule_data:
                     rule_type = rule_data['type']
                     match_pattern = rule_data['match']
                     replace_pattern = rule_data['replace']
                     regex_match = rule_data.get('regexMatch')
-                    
+
                     if rule_type == "Headers (simple string):":
-                        modifiedHeaders = [h.replace(match_pattern, replace_pattern) for h in headers[1:]]
-                        headers = [headers[0]] + modifiedHeaders
+                        if match_pattern:
+                            modifiedHeaders = [h.replace(match_pattern, replace_pattern) for h in headers[1:]]
+                            headers = [headers[0]] + modifiedHeaders
                     elif rule_type == "Headers (regex):":
-                        if regex_match:
+                        if regex_match and match_pattern:
                             modifiedHeaders = [regex_match.sub(replace_pattern, h) for h in headers[1:]]
                             headers = [headers[0]] + modifiedHeaders
-
-            if not queryFlag and user_headers_text:
-                replaceStringLines = user_headers_text.split("\n")
-                for h in replaceStringLines:
-                    if h.strip() and ':' in h:
-                        headers.append(h.strip())
+                    elif rule_type == "Header Add/Set:":
+                        header_name = match_pattern.strip()
+                        if header_name:
+                            headers = [headers[0]] + upsert_header(
+                                headers[1:], header_name, replace_pattern.strip()
+                            )
 
     msgBody = messageInfo.getRequest()[requestInfo.getBodyOffset():]
 
     if authorizeOrNot and msgBody is not None:
         msgBody_str = self._helpers.bytesToString(msgBody)
-        
-        for i in range(mr_instance.MRModel.getSize()):
-            rule_key = mr_instance.MRModel.getElementAt(i)
-            rule_data = mr_instance.badProgrammerMRModel.get(rule_key)
-            
+
+        for i in range(mr_model.getSize() if mr_model else 0):
+            rule_key = mr_model.getElementAt(i)
+            rule_data = _get_rule_data(mr_instance, rule_key)
+
             if rule_data:
                 rule_type = rule_data['type']
                 match_pattern = rule_data['match']
                 replace_pattern = rule_data['replace']
                 regex_match = rule_data.get('regexMatch')
-                
+
                 if rule_type == "Path (simple string):":
                     uriPath = headers[0].split(" ")[1]
-                    if match_pattern in uriPath:
+                    if match_pattern and match_pattern in uriPath:
                         headers[0] = headers[0].replace(match_pattern, replace_pattern)
                 elif rule_type == "Path (regex):":
-                    if regex_match:
+                    if regex_match and match_pattern:
                         uriPath = headers[0].split(" ")[1]
                         if regex_match.search(uriPath):
                             headers[0] = regex_match.sub(replace_pattern, headers[0])
-                
+
                 elif rule_type == "Body (simple string):":
-                    msgBody_str = msgBody_str.replace(match_pattern, replace_pattern)
+                    if match_pattern:
+                        msgBody_str = msgBody_str.replace(match_pattern, replace_pattern)
                 elif rule_type == "Body (regex):":
-                    if regex_match:
+                    if regex_match and match_pattern:
                         msgBody_str = regex_match.sub(replace_pattern, msgBody_str)
-        
+
         msgBody = self._helpers.stringToBytes(msgBody_str)
 
     return self._helpers.buildHttpMessage(headers, msgBody)
