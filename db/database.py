@@ -317,15 +317,40 @@ class DatabaseManager:
                 try:
                     # Retry with BLOB columns cast to TEXT
                     if USE_ZXJDBC:
+                        import re
+
                         retry_query = query
-                        if "request_data" in retry_query:
-                            retry_query = retry_query.replace(
-                                "request_data", "CAST(request_data AS TEXT)"
-                            )
-                        if "response_data" in retry_query:
-                            retry_query = retry_query.replace(
-                                "response_data", "CAST(response_data AS TEXT)"
-                            )
+                        blob_columns = [
+                            "executed_request_data",
+                            "request_data",
+                            "response_data",
+                            "response_body",
+                            "request_data",
+                            "body",
+                        ]
+
+                        for col in blob_columns:
+                            if "CAST(" + col in retry_query or "CAST(r." + col in retry_query:
+                                continue
+
+                            pattern = r"(?<!\w)(\w+\.)?(" + re.escape(col) + r")\b"
+
+                            def replace_func(match):
+                                prefix = match.group(1) if match.group(1) else ""
+                                col_name = match.group(2)
+                                return "CAST(" + prefix + col_name + " AS TEXT) as " + col_name
+
+                            if " FROM " in retry_query.upper():
+                                parts = re.split(
+                                    r"\bFROM\b", retry_query, maxsplit=1, flags=re.IGNORECASE
+                                )
+                                if len(parts) == 2:
+                                    parts[0] = re.sub(pattern, replace_func, parts[0])
+                                    retry_query = parts[0] + " FROM " + parts[1]
+                                else:
+                                    retry_query = re.sub(pattern, replace_func, retry_query)
+                            else:
+                                retry_query = re.sub(pattern, replace_func, retry_query)
 
                         print("[DB] Retrying with CAST conversion...")
                         cursor2 = conn.cursor()
