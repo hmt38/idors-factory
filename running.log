@@ -1260,3 +1260,38 @@ Attack generation complete.
 [Autorize] Building user request for Pong with 0 match/replace rules
 [Autorize] Building user request for Ping with 0 match/replace rules
 [Autorize] Building user request for Pong with 0 match/replace rules
+Autorize extension unloaded.
+[IDOR] ========== IDORAttackPanel.__init__ CALLED ==========
+[IDOR] Extender object: org.python.proxies.__main__$BurpExtender$42@6ff0ebb6
+[IDOR] Layout created
+[IDOR] Top panel created and added
+[IDOR] Split pane created
+[IDOR] Creating table model...
+[IDOR] Creating JTable...
+[IDOR] JTable created
+[IDOR] Registering selection listener for table...
+[IDOR] Selection model: javax.swing.DefaultListSelectionModel 1873633288 ={}
+[IDOR] Selection listener registered successfully
+[IDOR] Creating top tabs...
+[IDOR] Creating message editors...
+[IDOR] Request editor created
+[IDOR] Response editor created
+[IDOR] ========== IDORAttackPanel.__init__ COMPLETED ==========
+[IDOR] Panel fully initialized and ready
+
+Welcome to IDORs Factory (越权工厂) v1.9.4
+Based on secondary development of Autorize
+Designed by Thai
+
+This tool integrates intelligent parameter extraction, fuzzing, and LLM-based analysis 
+to detect IDOR vulnerabilities more effectively.
+
+Enjoy your testing!
+
+Calculated database path: C:\Users\icsl\Desktop\project\coding\idor-factory\idors-factory\autorize_traffic.db
+Fallback database path: C:\Users\icsl\Desktop\project\coding\idor-factory\idors-factory\autorize_traffic.db
+Added new columns to attack_queue
+Database initialized successfully at C:\Users\icsl\Desktop\project\coding\idor-factory\idors-factory\autorize_traffic.db
+DatabaseManager initialized successfully.
+Parameter Extractor and Attack Engine initialized (Manual Mode).
+Auto IDOR scheduler initialized (disabled by default).

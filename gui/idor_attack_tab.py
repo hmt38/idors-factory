@@ -13,6 +13,7 @@ from javax.swing import (
     ListSelectionModel,
     SwingUtilities,
     JTextArea,
+    JTextField,
     JCheckBox,
     JPopupMenu,
 
