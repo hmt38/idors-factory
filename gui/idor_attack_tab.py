@@ -13,10 +13,9 @@ from javax.swing import (
     ListSelectionModel,
     SwingUtilities,
     JTextArea,
-    JTextField,
     JCheckBox,
-    JComboBox,
     JPopupMenu,
+
     JMenuItem,
 )
 from javax.swing.table import (
@@ -229,8 +228,7 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
         # Top Bar (Controls)
         self.top_panel = JPanel(FlowLayout(FlowLayout.LEFT))
 
-        self.hidden_param_enabled = JCheckBox("Hidden Param")
-        self.hidden_param_location = JComboBox(["Query", "Header"])
+        self.hidden_param_enabled = JCheckBox("Hidden Query Param")
         self.hidden_param_key = JTextField(16)
         self.hidden_param_a_value = JTextArea(2, 14)
         self.hidden_param_a_value.setLineWrap(True)
@@ -262,10 +260,8 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
         self.top_panel.add(self.btn_execute)
         self.top_panel.add(self.btn_batch_get)
         self.top_panel.add(self.btn_clear)
-        self.top_panel.add(JLabel(" | Hidden Param:"))
+        self.top_panel.add(JLabel(" | Hidden Query Param only (headers/body/path/query user rules are managed in Users):"))
         self.top_panel.add(self.hidden_param_enabled)
-        self.top_panel.add(JLabel("Loc"))
-        self.top_panel.add(self.hidden_param_location)
         self.top_panel.add(JLabel("Key"))
         self.top_panel.add(self.hidden_param_key)
         self.top_panel.add(JLabel("A"))
@@ -405,12 +401,6 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
                 elif b_value and not a_value:
                     selected_value = b_value
 
-            location = "QUERY"
-            if hasattr(self, "hidden_param_location"):
-                selected_location = str(self.hidden_param_location.getSelectedItem()).strip().lower()
-                if selected_location == "header":
-                    location = "HEADER"
-
             return {
                 "enabled": True,
                 "key": key,
@@ -419,7 +409,7 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
                 "a_value": a_value,
                 "b_value": b_value,
                 "value": selected_value,
-                "location": location,
+                "location": "QUERY",
             }
         except Exception:
             return None
@@ -449,7 +439,6 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
             "enabled": bool(
                 hasattr(self, "hidden_param_enabled") and self.hidden_param_enabled.isSelected()
             ),
-            "location": str(self.hidden_param_location.getSelectedItem()) if hasattr(self, "hidden_param_location") else "Query",
             "key": self.hidden_param_key.getText() if hasattr(self, "hidden_param_key") else "",
             "a_value": self.hidden_param_a_value.getText() if hasattr(self, "hidden_param_a_value") else "",
             "b_value": self.hidden_param_b_value.getText() if hasattr(self, "hidden_param_b_value") else "",
@@ -467,8 +456,6 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
                 self.hidden_param_enabled.setSelected(bool(state.get("enabled", False)))
             if hasattr(self, "hidden_param_key"):
                 self.hidden_param_key.setText(state.get("key", ""))
-            if hasattr(self, "hidden_param_location"):
-                self.hidden_param_location.setSelectedItem(state.get("location", "Query"))
             if hasattr(self, "hidden_param_a_value"):
                 self.hidden_param_a_value.setText(state.get("a_value", ""))
             if hasattr(self, "hidden_param_b_value"):

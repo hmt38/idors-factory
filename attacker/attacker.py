@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import json
+from authorization.authorization import apply_user_rules_to_request_components
 import time
 
 from helpers.llm_helper import LLMHelper
@@ -570,6 +571,82 @@ class AttackEngine:
         elif isinstance(current, dict):
             current[last_key] = new_value
 
+    def _get_user_rule_context(self, target_user):
+        extender = getattr(self.db_manager, "extender", None)
+        if not extender or not hasattr(extender, "userTab") or not extender.userTab:
+            return None, ""
+
+        for user_id, user_data in extender.userTab.user_tabs.items():
+            user_name = user_data.get("user_name")
+            if str(user_name).strip().lower() == str(target_user).strip().lower():
+                mr_instance = user_data.get("mr_instance")
+                headers_instance = user_data.get("headers_instance")
+                user_headers_text = ""
+                try:
+                    if headers_instance and hasattr(headers_instance, "replaceString"):
+                        user_headers_text = headers_instance.replaceString.getText()
+                except Exception:
+                    user_headers_text = ""
+                return mr_instance, user_headers_text
+
+        return None, ""
+
+    def _apply_user_context_rules_to_request_data(self, request_data, target_user, helpers):
+        if not request_data:
+            return request_data
+
+        mr_instance, user_headers_text = self._get_user_rule_context(target_user)
+        if mr_instance is None and not user_headers_text:
+            return request_data
+
+        headers = list(request_data.get("headers") or [])
+        if not headers:
+            return request_data
+
+        body = request_data.get("body")
+        if body is None:
+            body_text = ""
+        elif isinstance(body, unicode):
+            body_text = body
+        else:
+            try:
+                body_text = helpers.bytesToString(body)
+            except Exception:
+                body_text = str(body)
+
+        request_line, header_lines, body_text = apply_user_rules_to_request_components(
+            self.db_manager.extender,
+            headers[0],
+            headers[1:],
+            body_text,
+            mr_instance,
+            user_headers_text,
+            True,
+        )
+
+        request_data["headers"] = [request_line] + header_lines
+        request_data["body"] = body_text
+
+        uri = request_line.split(" ")[1] if " " in request_line else request_data.get("path", "")
+        if "?" in uri:
+            path_part, query_string = uri.split("?", 1)
+        else:
+            path_part, query_string = uri, ""
+
+        request_data["path"] = path_part
+        query_params = {}
+        if query_string:
+            for pair in query_string.split("&"):
+                if pair == "":
+                    continue
+                if "=" in pair:
+                    key, value = pair.split("=", 1)
+                else:
+                    key, value = pair, ""
+                query_params[key] = value
+        request_data["query_params"] = query_params
+        return request_data
+
     def _parse_hidden_header_entries(self, header_key_text, header_value_text):
         entries = []
         key_lines = [line.strip() for line in str(header_key_text or "").splitlines()]
@@ -1059,6 +1136,9 @@ class AttackEngine:
         )
 
         # 2. Reconstruct Request (Correctly updating Request Line)
+        request_data = self._apply_user_context_rules_to_request_data(
+            request_data, target_user, helpers
+        )
         new_request_bytes = self.reconstruct_request(request_data, helpers)
 
         # 3. Determine Service Details (Host, Port, Protocol)

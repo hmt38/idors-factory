@@ -36,6 +36,7 @@ class MatchReplace():
         MRStrings = ["Headers (simple string):",
                      "Headers (regex):",
                      "Header Add/Set:",
+                     "Query Add/Set:",
                      "Body (simple string):",
                      "Body (regex):",
                      "Path (simple string):",
@@ -270,12 +271,16 @@ class MatchReplace():
         match = self._extender.MText.getText().strip()
         replace = self._extender.RText.getText()
 
-        if typeName != "Header Add/Set:" and not match:
+        if typeName != "Header Add/Set:" and typeName != "Query Add/Set:" and not match:
             self._extender.MRFeedback.setText("ERROR: Match cannot be empty")
             return
 
         if typeName == "Header Add/Set:" and (not match or ":" in match or "\n" in match):
             self._extender.MRFeedback.setText("ERROR: Header name is invalid")
+            return
+
+        if typeName == "Query Add/Set:" and (not match or "=" in match or "&" in match or "\n" in match):
+            self._extender.MRFeedback.setText("ERROR: Query parameter name is invalid")
             return
 
         key = typeName + " " + match + "->" + replace

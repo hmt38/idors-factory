@@ -3,6 +3,7 @@
 
 import re
 from burp import IHttpRequestResponse
+from authorization.authorization import apply_user_rules_to_request_components
 
 def isStatusCodesReturned(self, messageInfo, statusCodes):
     firstHeader = self._helpers.analyzeResponse(messageInfo.getResponse()).getHeaders()[0]

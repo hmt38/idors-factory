@@ -535,9 +535,51 @@ def _get_isolated_mr_rule_count(mr_instance):
 
     return isolated_model.getSize()
 
-def makeUserMessage(self, messageInfo, removeOrNot, authorizeOrNot, mr_instance, user_headers_text=""):
-    requestInfo = self._helpers.analyzeRequest(messageInfo)
-    headers = list(requestInfo.getHeaders())
+def _set_query_param_in_request_line(request_line, param_key, param_value):
+    try:
+        parts = request_line.split(" ")
+        if len(parts) < 3:
+            return request_line
+
+        method = parts[0]
+        uri = parts[1]
+        version = " ".join(parts[2:])
+
+        if "?" in uri:
+            path_part, query_string = uri.split("?", 1)
+        else:
+            path_part, query_string = uri, ""
+
+        query_pairs = []
+        found = False
+        if query_string:
+            for pair in query_string.split("&"):
+                if pair == "":
+                    continue
+                if "=" in pair:
+                    key, value = pair.split("=", 1)
+                else:
+                    key, value = pair, ""
+
+                if key == param_key:
+                    query_pairs.append("{}={}".format(param_key, param_value))
+                    found = True
+                else:
+                    query_pairs.append(pair)
+
+        if not found:
+            query_pairs.append("{}={}".format(param_key, param_value))
+
+        new_uri = path_part
+        if query_pairs:
+            new_uri += "?" + "&".join(query_pairs)
+
+        return "{} {} {}".format(method, new_uri, version)
+    except Exception:
+        return request_line
+
+def apply_user_rules_to_request_components(self, request_line, header_lines, body_text, mr_instance, user_headers_text="", apply_user_header_text=True):
+    headers = [request_line] + list(header_lines or [])
     mr_model = _get_mr_model(mr_instance)
 
     def parse_header_lines(header_text):
@@ -556,15 +598,15 @@ def makeUserMessage(self, messageInfo, removeOrNot, authorizeOrNot, mr_instance,
                 parsed.append((name, value))
         return parsed
 
-    def upsert_header(header_lines, header_name, header_value):
+    def upsert_header(header_lines_only, header_name, header_value):
         if not header_name:
-            return header_lines
+            return header_lines_only
 
         updated = []
         replaced = False
         target_name = header_name.lower()
 
-        for line in header_lines:
+        for line in header_lines_only:
             if ':' in line:
                 current_name = line.split(':', 1)[0].strip().lower()
                 if current_name == target_name:
@@ -580,98 +622,109 @@ def makeUserMessage(self, messageInfo, removeOrNot, authorizeOrNot, mr_instance,
         return updated
 
     user_header_pairs = parse_header_lines(user_headers_text)
+    queryFlag = self.replaceQueryParam.isSelected()
 
-    if removeOrNot:
-        queryFlag = self.replaceQueryParam.isSelected()
-
+    if apply_user_header_text and (user_header_pairs or user_headers_text):
         if queryFlag:
             if user_headers_text:
                 param = user_headers_text.split("=")
                 if len(param) >= 2:
                     paramKey = param[0]
-                    paramValue = param[1]
-                    pattern = r"([\?&]){}=.*?(?=[\s&])".format(paramKey)
-                    patchedHeader = re.sub(pattern, r"\1{}={}".format(paramKey, paramValue), headers[0], count=1, flags=re.DOTALL)
-                    headers[0] = patchedHeader
+                    paramValue = "=".join(param[1:])
+                    headers[0] = _set_query_param_in_request_line(headers[0], paramKey, paramValue)
         else:
-            if user_header_pairs:
-                removeHeaderNames = [name.lower() + ':' for name, value in user_header_pairs]
+            removeHeaderNames = [name.lower() + ':' for name, value in user_header_pairs]
+            if removeHeaderNames:
+                headers = [headers[0]] + [
+                    header for header in headers[1:]
+                    if not any(header.lower().startswith(removeHeader) for removeHeader in removeHeaderNames)
+                ]
 
-                headers_to_remove = []
-                for header in headers[1:]:
-                    for removeHeader in removeHeaderNames:
-                        if header.lower().startswith(removeHeader):
-                            headers_to_remove.append(header)
+    if apply_user_header_text and user_header_pairs and not queryFlag:
+        for name, value in user_header_pairs:
+            headers = [headers[0]] + upsert_header(headers[1:], name, value)
 
-                for header in headers_to_remove:
-                    if header in headers:
-                        headers.remove(header)
+    for i in range(mr_model.getSize() if mr_model else 0):
+        rule_key = mr_model.getElementAt(i)
+        rule_data = _get_rule_data(mr_instance, rule_key)
 
-        if authorizeOrNot:
-            if not queryFlag and user_header_pairs:
-                for name, value in user_header_pairs:
-                    headers = [headers[0]] + upsert_header(headers[1:], name, value)
+        if rule_data:
+            rule_type = rule_data['type']
+            match_pattern = rule_data['match']
+            replace_pattern = rule_data['replace']
+            regex_match = rule_data.get('regexMatch')
 
-            for i in range(mr_model.getSize() if mr_model else 0):
-                rule_key = mr_model.getElementAt(i)
-                rule_data = _get_rule_data(mr_instance, rule_key)
+            if rule_type == "Headers (simple string):":
+                if match_pattern:
+                    modifiedHeaders = [h.replace(match_pattern, replace_pattern) for h in headers[1:]]
+                    headers = [headers[0]] + modifiedHeaders
+            elif rule_type == "Headers (regex):":
+                if regex_match and match_pattern:
+                    modifiedHeaders = [regex_match.sub(replace_pattern, h) for h in headers[1:]]
+                    headers = [headers[0]] + modifiedHeaders
+            elif rule_type == "Header Add/Set:":
+                header_name = match_pattern.strip()
+                if header_name:
+                    headers = [headers[0]] + upsert_header(
+                        headers[1:], header_name, replace_pattern.strip()
+                    )
+            elif rule_type == "Query Add/Set:":
+                query_name = match_pattern.strip()
+                if query_name:
+                    headers[0] = _set_query_param_in_request_line(
+                        headers[0], query_name, replace_pattern
+                    )
 
-                if rule_data:
-                    rule_type = rule_data['type']
-                    match_pattern = rule_data['match']
-                    replace_pattern = rule_data['replace']
-                    regex_match = rule_data.get('regexMatch')
+    if body_text is None:
+        body_text = ""
 
-                    if rule_type == "Headers (simple string):":
-                        if match_pattern:
-                            modifiedHeaders = [h.replace(match_pattern, replace_pattern) for h in headers[1:]]
-                            headers = [headers[0]] + modifiedHeaders
-                    elif rule_type == "Headers (regex):":
-                        if regex_match and match_pattern:
-                            modifiedHeaders = [regex_match.sub(replace_pattern, h) for h in headers[1:]]
-                            headers = [headers[0]] + modifiedHeaders
-                    elif rule_type == "Header Add/Set:":
-                        header_name = match_pattern.strip()
-                        if header_name:
-                            headers = [headers[0]] + upsert_header(
-                                headers[1:], header_name, replace_pattern.strip()
-                            )
+    for i in range(mr_model.getSize() if mr_model else 0):
+        rule_key = mr_model.getElementAt(i)
+        rule_data = _get_rule_data(mr_instance, rule_key)
 
-    msgBody = messageInfo.getRequest()[requestInfo.getBodyOffset():]
+        if rule_data:
+            rule_type = rule_data['type']
+            match_pattern = rule_data['match']
+            replace_pattern = rule_data['replace']
+            regex_match = rule_data.get('regexMatch')
 
-    if authorizeOrNot and msgBody is not None:
-        msgBody_str = self._helpers.bytesToString(msgBody)
-
-        for i in range(mr_model.getSize() if mr_model else 0):
-            rule_key = mr_model.getElementAt(i)
-            rule_data = _get_rule_data(mr_instance, rule_key)
-
-            if rule_data:
-                rule_type = rule_data['type']
-                match_pattern = rule_data['match']
-                replace_pattern = rule_data['replace']
-                regex_match = rule_data.get('regexMatch')
-
-                if rule_type == "Path (simple string):":
+            if rule_type == "Path (simple string):":
+                uriPath = headers[0].split(" ")[1]
+                if match_pattern and match_pattern in uriPath:
+                    headers[0] = headers[0].replace(match_pattern, replace_pattern)
+            elif rule_type == "Path (regex):":
+                if regex_match and match_pattern:
                     uriPath = headers[0].split(" ")[1]
-                    if match_pattern and match_pattern in uriPath:
-                        headers[0] = headers[0].replace(match_pattern, replace_pattern)
-                elif rule_type == "Path (regex):":
-                    if regex_match and match_pattern:
-                        uriPath = headers[0].split(" ")[1]
-                        if regex_match.search(uriPath):
-                            headers[0] = regex_match.sub(replace_pattern, headers[0])
+                    if regex_match.search(uriPath):
+                        headers[0] = regex_match.sub(replace_pattern, headers[0])
 
-                elif rule_type == "Body (simple string):":
-                    if match_pattern:
-                        msgBody_str = msgBody_str.replace(match_pattern, replace_pattern)
-                elif rule_type == "Body (regex):":
-                    if regex_match and match_pattern:
-                        msgBody_str = regex_match.sub(replace_pattern, msgBody_str)
+            elif rule_type == "Body (simple string):":
+                if match_pattern:
+                    body_text = body_text.replace(match_pattern, replace_pattern)
+            elif rule_type == "Body (regex):":
+                if regex_match and match_pattern:
+                    body_text = regex_match.sub(replace_pattern, body_text)
 
-        msgBody = self._helpers.stringToBytes(msgBody_str)
+    return headers[0], headers[1:], body_text
 
-    return self._helpers.buildHttpMessage(headers, msgBody)
+def makeUserMessage(self, messageInfo, removeOrNot, authorizeOrNot, mr_instance, user_headers_text=""):
+    requestInfo = self._helpers.analyzeRequest(messageInfo)
+    headers = list(requestInfo.getHeaders())
+    body_bytes = messageInfo.getRequest()[requestInfo.getBodyOffset():]
+    body_text = self._helpers.bytesToString(body_bytes) if body_bytes is not None else ""
+
+    request_line, header_lines, body_text = apply_user_rules_to_request_components(
+        self,
+        headers[0],
+        headers[1:],
+        body_text,
+        mr_instance,
+        user_headers_text,
+        removeOrNot and authorizeOrNot,
+    )
+
+    msgBody = self._helpers.stringToBytes(body_text)
+    return self._helpers.buildHttpMessage([request_line] + header_lines, msgBody)
 
 def send_request_to_autorize(self, messageInfo):
     if messageInfo.getResponse() is None:
