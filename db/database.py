@@ -443,13 +443,13 @@ class DatabaseManager:
                 # But let's stick to 'burp_generated_requests' or 'attack_queue'?
                 # The requirements said 'attack_queue'. Let's use that.
                 cursor.execute(
-                    "CREATE TABLE IF NOT EXISTS attack_queue (id INTEGER PRIMARY KEY AUTOINCREMENT, original_request_id INTEGER, target_user TEXT, payload_description TEXT, request_data BLOB, status TEXT DEFAULT 'PENDING', response_data BLOB, response_code INTEGER, vulnerability_score INTEGER, llm_verification_result TEXT, verified BOOLEAN DEFAULT 0, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(original_request_id) REFERENCES raw_requests(id))"
+                    "CREATE TABLE IF NOT EXISTS attack_queue (id INTEGER PRIMARY KEY AUTOINCREMENT, original_request_id INTEGER, target_user TEXT, payload_description TEXT, request_data BLOB, status TEXT DEFAULT 'PENDING', response_data BLOB, response_code INTEGER, vulnerability_score INTEGER, llm_verification_result TEXT, verified BOOLEAN DEFAULT 0, executed_request_data BLOB, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(original_request_id) REFERENCES raw_requests(id))"
                 )
 
                 # Check for new columns in attack_queue
                 try:
                     cursor.execute(
-                        "SELECT response_data, response_code, llm_verification_result, verified FROM attack_queue LIMIT 1"
+                        "SELECT response_data, response_code, llm_verification_result, verified, executed_request_data FROM attack_queue LIMIT 1"
                     )
                 except:
                     # Columns might be missing
@@ -474,6 +474,12 @@ class DatabaseManager:
                     try:
                         cursor.execute(
                             "ALTER TABLE attack_queue ADD COLUMN verified BOOLEAN DEFAULT 0"
+                        )
+                    except:
+                        pass
+                    try:
+                        cursor.execute(
+                            "ALTER TABLE attack_queue ADD COLUMN executed_request_data BLOB"
                         )
                     except:
                         pass

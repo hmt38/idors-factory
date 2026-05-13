@@ -42,7 +42,7 @@ class AttackEngine:
         except:
             self.llm_helper = None
 
-    def generate_attacks(self):
+    def generate_attacks(self, hidden_param_config=None):
         self._init_llm()
         """
         Scan for requests from User A (or any user) that haven't been attacked yet,
@@ -113,7 +113,7 @@ class AttackEngine:
                 SwingUtilities.invokeLater(update_progress)
 
             try:
-                self._process_request(req)
+                self._process_request(req, hidden_param_config)
             except Exception as e:
                 print(
                     "[Attacker] Error processing request {}: {}".format(req_id, str(e))
@@ -199,7 +199,7 @@ class AttackEngine:
                     )
                     self.db_manager.execute_query(update_sql)
 
-    def _process_request(self, req):
+    def _process_request(self, req, hidden_param_config=None):
         (
             req_id,
             method,
@@ -390,9 +390,9 @@ class AttackEngine:
                 combinations.append(swappable_params)
 
             for combo in combinations:
-                self._create_attack_entry_for_combination(req, combo, other_user)
+                self._create_attack_entry_for_combination(req, combo, other_user, hidden_param_config)
 
-    def _create_attack_entry_for_combination(self, req, combination, target_user):
+    def _create_attack_entry_for_combination(self, req, combination, target_user, hidden_param_config=None):
         (
             req_id,
             method,
@@ -488,15 +488,46 @@ class AttackEngine:
         if b_dict:
             new_body_str = json.dumps(b_dict)
 
+        hidden_param_applied = False
+        hidden_param_entry = self._build_hidden_param_entry(hidden_param_config, target_user)
+        if hidden_param_entry:
+            request_data_preview = {
+                "method": method,
+                "host": host,
+                "path": new_path,
+                "headers": json.loads(headers_json),
+                "query_params": json.loads(new_query_str) if new_query_str else {},
+                "body": new_body_str,
+            }
+            request_data_preview = self._apply_hidden_param_to_request_data(
+                request_data_preview, hidden_param_entry
+            )
+            new_path = request_data_preview["path"]
+            new_body_str = request_data_preview["body"]
+            hidden_headers = request_data_preview.get("headers", json.loads(headers_json))
+            hidden_query_params = request_data_preview.get("query_params", {})
+            hidden_param_applied = True
+        else:
+            hidden_headers = json.loads(headers_json)
+            hidden_query_params = json.loads(new_query_str) if new_query_str else {}
+
         # Create Request Data
         request_data = {
             "method": method,
             "host": host,
             "path": new_path,
-            "headers": json.loads(headers_json),
-            "query_params": json.loads(new_query_str) if new_query_str else {},
+            "headers": hidden_headers,
+            "query_params": hidden_query_params,
             "body": new_body_str,
         }
+
+        if hidden_param_entry:
+            request_data["hidden_param"] = hidden_param_entry
+
+        if hidden_param_applied:
+            description += " | Hidden param: {}={}".format(
+                hidden_param_entry["key"], hidden_param_entry["value"]
+            )
 
         request_data_json_str = json.dumps(request_data).replace("'", "''")
         description_str = description.replace("'", "''")
@@ -538,6 +569,157 @@ class AttackEngine:
                 pass
         elif isinstance(current, dict):
             current[last_key] = new_value
+
+    def _parse_hidden_header_entries(self, header_key_text, header_value_text):
+        entries = []
+        key_lines = [line.strip() for line in str(header_key_text or "").splitlines()]
+        value_lines = [line.strip() for line in str(header_value_text or "").splitlines()]
+
+        normalized_keys = [line for line in key_lines if line]
+        normalized_values = [line for line in value_lines if line != ""]
+
+        if len(normalized_keys) > 1:
+            for idx, key in enumerate(normalized_keys):
+                value = normalized_values[idx] if idx < len(normalized_values) else ""
+                if key:
+                    entries.append((key, value))
+            return entries
+
+        single_key = normalized_keys[0] if normalized_keys else str(header_key_text or "").strip()
+        if not single_key:
+            return entries
+
+        raw_values = str(header_value_text or "")
+        value_candidates = [line.strip() for line in raw_values.splitlines() if line.strip()]
+        if not value_candidates:
+            entries.append((single_key, ""))
+            return entries
+
+        for line in value_candidates:
+            if ":" in line:
+                name, value = line.split(":", 1)
+                name = name.strip()
+                if name:
+                    entries.append((name, value.strip()))
+            else:
+                entries.append((single_key, line))
+
+        return entries
+
+    def _upsert_header(self, headers, header_name, header_value):
+        if not headers:
+            headers = []
+        if not header_name:
+            return headers
+
+        updated = []
+        replaced = False
+        target_name = header_name.strip().lower()
+
+        for i, line in enumerate(headers):
+            if i == 0:
+                updated.append(line)
+                continue
+            if ":" in line:
+                current_name = line.split(":", 1)[0].strip().lower()
+                if current_name == target_name:
+                    if not replaced:
+                        updated.append("{}: {}".format(header_name, header_value))
+                        replaced = True
+                    continue
+            updated.append(line)
+
+        if not replaced:
+            if updated:
+                updated.append("{}: {}".format(header_name, header_value))
+            else:
+                updated = ["{}: {}".format(header_name, header_value)]
+
+        return updated
+
+    def _build_hidden_param_entry(self, hidden_param_config, target_user=None):
+        if not hidden_param_config:
+            return None
+
+        try:
+            enabled = hidden_param_config.get("enabled", True)
+            key = hidden_param_config.get("key", "").strip()
+            if not enabled or not key:
+                return None
+
+            value = hidden_param_config.get("value")
+            if target_user is not None:
+                target_user_l = str(target_user).strip().lower()
+                a_user = hidden_param_config.get("a_user", "")
+                b_user = hidden_param_config.get("b_user", "")
+                if b_user and target_user_l == str(b_user).strip().lower():
+                    value = hidden_param_config.get("b_value")
+                elif a_user and target_user_l == str(a_user).strip().lower():
+                    value = hidden_param_config.get("a_value")
+                elif hidden_param_config.get("b_value") and not hidden_param_config.get("a_value"):
+                    value = hidden_param_config.get("b_value")
+                elif hidden_param_config.get("a_value") is not None:
+                    value = hidden_param_config.get("a_value")
+
+            if value is None:
+                value = ""
+
+            location = hidden_param_config.get("location", "QUERY")
+            header_entries = []
+            if location == "HEADER":
+                header_entries = self._parse_hidden_header_entries(key, value)
+                if not header_entries:
+                    return None
+
+            return {
+                "enabled": True,
+                "key": key,
+                "value": value,
+                "location": location,
+                "header_entries": header_entries,
+                "a_value": hidden_param_config.get("a_value", ""),
+                "b_value": hidden_param_config.get("b_value", ""),
+            }
+        except Exception:
+            return None
+
+    def _apply_hidden_param_to_request_data(self, request_data, hidden_param_entry):
+        if not request_data or not hidden_param_entry:
+            return request_data
+
+        location = hidden_param_entry.get("location")
+
+        if location == "QUERY":
+            query_params = request_data.get("query_params") or {}
+            if not isinstance(query_params, dict):
+                query_params = {}
+
+            query_params[hidden_param_entry["key"]] = hidden_param_entry.get("value", "")
+            request_data["query_params"] = query_params
+        elif location == "HEADER":
+            headers = request_data.get("headers") or []
+            header_entries = hidden_param_entry.get("header_entries") or [
+                (hidden_param_entry["key"], hidden_param_entry.get("value", ""))
+            ]
+            for header_name, header_value in header_entries:
+                headers = self._upsert_header(headers, header_name, header_value)
+            request_data["headers"] = headers
+
+        request_data["hidden_param"] = hidden_param_entry
+        return request_data
+
+    def _describe_hidden_param(self, hidden_param_entry):
+        if not hidden_param_entry:
+            return ""
+        if hidden_param_entry.get("location") == "HEADER":
+            entries = hidden_param_entry.get("header_entries") or []
+            if entries:
+                return ", ".join(
+                    ["{}={}".format(name, value) for name, value in entries]
+                )
+        return "{}={}".format(
+            hidden_param_entry.get("key", ""), hidden_param_entry.get("value", "")
+        )
 
     def _extract_params_from_request(self, path, query_params_json, body):
         params = []  # (name, value, location)
@@ -770,7 +952,7 @@ class AttackEngine:
 
         return helpers.buildHttpMessage(headers_list, body)
 
-    def execute_pending_get_attacks(self, callbacks, helpers, llm_config=None, limit=50):
+    def execute_pending_get_attacks(self, callbacks, helpers, llm_config=None, limit=50, hidden_param_config=None, apply_hidden_param_on_execute=False):
         """
         Execute pending GET attacks only. Used by both manual batch execution
         and scheduled automation to avoid mutating APIs.
@@ -806,7 +988,14 @@ class AttackEngine:
         for attack_row in attacks:
             attack_id = attack_row[0]
             try:
-                result = self.execute_attack(attack_id, callbacks, helpers, llm_config)
+                result = self.execute_attack(
+                    attack_id,
+                    callbacks,
+                    helpers,
+                    llm_config,
+                    hidden_param_config,
+                    apply_hidden_param_on_execute,
+                )
                 if result:
                     summary["success"] += 1
                     if result.get("status") == "VULNERABLE":
@@ -834,14 +1023,14 @@ class AttackEngine:
 
         return summary
 
-    def execute_attack(self, attack_id, callbacks, helpers, llm_config=None):
+    def execute_attack(self, attack_id, callbacks, helpers, llm_config=None, hidden_param_config=None, apply_hidden_param_on_execute=False):
         from java.util import ArrayList
         from helpers.llm_helper import LLMHelper
         from java.net import URL
 
         # 1. Fetch attack data
         sql = (
-            "SELECT request_data, original_request_id FROM attack_queue WHERE id = "
+            "SELECT request_data, original_request_id, target_user FROM attack_queue WHERE id = "
             + str(attack_id)
         )
         rows = self.db_manager.fetch_all(sql)
@@ -849,8 +1038,18 @@ class AttackEngine:
             print("[Attacker] Attack ID {} not found.".format(attack_id))
             return None
 
-        request_data_json, original_req_id = rows[0]
+        request_data_json, original_req_id, target_user = rows[0]
         request_data = json.loads(request_data_json)
+
+        if apply_hidden_param_on_execute:
+            hidden_param_entry = self._build_hidden_param_entry(hidden_param_config, target_user)
+            if hidden_param_entry:
+                request_data = self._apply_hidden_param_to_request_data(request_data, hidden_param_entry)
+                print(
+                    "[Attacker] Applying hidden param on execute for attack {}: {}".format(
+                        attack_id, self._describe_hidden_param(hidden_param_entry)
+                    )
+                )
 
         # Verify Attack ID in request_data if possible, or just trust the DB row
         print(
@@ -979,12 +1178,12 @@ class AttackEngine:
 
         update_sql = """
         UPDATE attack_queue 
-        SET status = ?, response_data = ?, response_code = ?, llm_verification_result = ?
+        SET status = ?, response_data = ?, response_code = ?, llm_verification_result = ?, executed_request_data = ?
         WHERE id = ?
         """
         self.db_manager.execute_query(
             update_sql,
-            (status, response_data_sql, response_code, llm_result_str, attack_id),
+            (status, response_data_sql, response_code, llm_result_str, new_request_bytes, attack_id),
         )
 
         return {"id": attack_id, "status": status, "code": response_code}

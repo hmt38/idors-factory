@@ -83,6 +83,11 @@ class SaveRestore():
                 tempRow = ["CheckBoxes", json.dumps(d)]
                 csvwriter.writerow(tempRow)
 
+                if hasattr(self._extender, 'idorAttackPanel') and self._extender.idorAttackPanel:
+                    hidden_param_state = self._extender.idorAttackPanel._collect_hidden_param_state()
+                    tempRow = ["IDORHiddenParam", base64.b64encode(json.dumps(hidden_param_state))]
+                    csvwriter.writerow(tempRow)
+
                 # Request/response list
                 for i in range(0, self._extender._log.size()):
                     logEntry = self._extender._log.get(i)
@@ -220,6 +225,15 @@ class SaveRestore():
                         d = json.loads(row[1])
                         for k in d:
                             getattr(self._extender, k).setSelected(d[k])
+                        continue
+
+                    if row[0] == "IDORHiddenParam":
+                        try:
+                            hidden_param_state = json.loads(base64.b64decode(row[1]))
+                            if hasattr(self._extender, 'idorAttackPanel') and self._extender.idorAttackPanel:
+                                self._extender.idorAttackPanel._restore_hidden_param_state(hidden_param_state)
+                        except Exception:
+                            pass
                         continue
 
                     if row[0] == "RemoveDuplicates":

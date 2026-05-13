@@ -13,6 +13,9 @@ from javax.swing import (
     ListSelectionModel,
     SwingUtilities,
     JTextArea,
+    JTextField,
+    JCheckBox,
+    JComboBox,
     JPopupMenu,
     JMenuItem,
 )
@@ -226,6 +229,22 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
         # Top Bar (Controls)
         self.top_panel = JPanel(FlowLayout(FlowLayout.LEFT))
 
+        self.hidden_param_enabled = JCheckBox("Hidden Param")
+        self.hidden_param_location = JComboBox(["Query", "Header"])
+        self.hidden_param_key = JTextField(16)
+        self.hidden_param_a_value = JTextArea(2, 14)
+        self.hidden_param_a_value.setLineWrap(True)
+        self.hidden_param_a_value.setWrapStyleWord(True)
+        self.hidden_param_b_value = JTextArea(2, 14)
+        self.hidden_param_b_value.setLineWrap(True)
+        self.hidden_param_b_value.setWrapStyleWord(True)
+        self.hidden_param_a_scroll = JScrollPane(self.hidden_param_a_value)
+        self.hidden_param_a_scroll.setPreferredSize(Dimension(150, 42))
+        self.hidden_param_b_scroll = JScrollPane(self.hidden_param_b_value)
+        self.hidden_param_b_scroll.setPreferredSize(Dimension(150, 42))
+        self.hidden_param_apply_existing = JCheckBox("Apply on execute")
+        self.hidden_param_apply_existing.setSelected(True)
+
         self.btn_refresh = JButton("Refresh", actionPerformed=self.refresh_table)
         self.btn_generate = JButton(
             "Generate Attacks", actionPerformed=self.generate_attacks
@@ -243,6 +262,17 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
         self.top_panel.add(self.btn_execute)
         self.top_panel.add(self.btn_batch_get)
         self.top_panel.add(self.btn_clear)
+        self.top_panel.add(JLabel(" | Hidden Param:"))
+        self.top_panel.add(self.hidden_param_enabled)
+        self.top_panel.add(JLabel("Loc"))
+        self.top_panel.add(self.hidden_param_location)
+        self.top_panel.add(JLabel("Key"))
+        self.top_panel.add(self.hidden_param_key)
+        self.top_panel.add(JLabel("A"))
+        self.top_panel.add(self.hidden_param_a_scroll)
+        self.top_panel.add(JLabel("B"))
+        self.top_panel.add(self.hidden_param_b_scroll)
+        self.top_panel.add(self.hidden_param_apply_existing)
         self.top_panel.add(
             JLabel(
                 " | Sensitive APIs (POST/PUT/DELETE) are highlighted in dark yellow and require manual execution."
@@ -350,6 +380,109 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
 
         print("[IDOR] ========== IDORAttackPanel.__init__ COMPLETED ==========")
         print("[IDOR] Panel fully initialized and ready")
+
+    def _build_hidden_param_config(self, target_user=None):
+        try:
+            if not hasattr(self, "hidden_param_enabled") or not self.hidden_param_enabled.isSelected():
+                return None
+
+            key = self.hidden_param_key.getText().strip() if hasattr(self, "hidden_param_key") else ""
+            if not key:
+                return None
+
+            a_value = self.hidden_param_a_value.getText() if hasattr(self, "hidden_param_a_value") else ""
+            b_value = self.hidden_param_b_value.getText() if hasattr(self, "hidden_param_b_value") else ""
+
+            selected_value = a_value
+            a_user = self._get_primary_user_name()
+            b_user = self._get_secondary_user_name()
+            if target_user:
+                target_user_l = str(target_user).strip().lower()
+                if b_user and target_user_l == b_user.lower():
+                    selected_value = b_value
+                elif a_user and target_user_l == a_user.lower():
+                    selected_value = a_value
+                elif b_value and not a_value:
+                    selected_value = b_value
+
+            location = "QUERY"
+            if hasattr(self, "hidden_param_location"):
+                selected_location = str(self.hidden_param_location.getSelectedItem()).strip().lower()
+                if selected_location == "header":
+                    location = "HEADER"
+
+            return {
+                "enabled": True,
+                "key": key,
+                "a_user": a_user,
+                "b_user": b_user,
+                "a_value": a_value,
+                "b_value": b_value,
+                "value": selected_value,
+                "location": location,
+            }
+        except Exception:
+            return None
+
+    def _get_primary_user_name(self):
+        try:
+            if hasattr(self.extender, "userTab") and self.extender.userTab:
+                user_ids = sorted(self.extender.userTab.user_tabs.keys())
+                if user_ids:
+                    return self.extender.userTab.user_tabs[user_ids[0]]["user_name"]
+        except Exception:
+            pass
+        return None
+
+    def _get_secondary_user_name(self):
+        try:
+            if hasattr(self.extender, "userTab") and self.extender.userTab:
+                user_ids = sorted(self.extender.userTab.user_tabs.keys())
+                if len(user_ids) > 1:
+                    return self.extender.userTab.user_tabs[user_ids[1]]["user_name"]
+        except Exception:
+            pass
+        return None
+
+    def _collect_hidden_param_state(self):
+        return {
+            "enabled": bool(
+                hasattr(self, "hidden_param_enabled") and self.hidden_param_enabled.isSelected()
+            ),
+            "location": str(self.hidden_param_location.getSelectedItem()) if hasattr(self, "hidden_param_location") else "Query",
+            "key": self.hidden_param_key.getText() if hasattr(self, "hidden_param_key") else "",
+            "a_value": self.hidden_param_a_value.getText() if hasattr(self, "hidden_param_a_value") else "",
+            "b_value": self.hidden_param_b_value.getText() if hasattr(self, "hidden_param_b_value") else "",
+            "apply_on_execute": bool(
+                hasattr(self, "hidden_param_apply_existing")
+                and self.hidden_param_apply_existing.isSelected()
+            ),
+        }
+
+    def _restore_hidden_param_state(self, state):
+        if not state:
+            return
+        try:
+            if hasattr(self, "hidden_param_enabled"):
+                self.hidden_param_enabled.setSelected(bool(state.get("enabled", False)))
+            if hasattr(self, "hidden_param_key"):
+                self.hidden_param_key.setText(state.get("key", ""))
+            if hasattr(self, "hidden_param_location"):
+                self.hidden_param_location.setSelectedItem(state.get("location", "Query"))
+            if hasattr(self, "hidden_param_a_value"):
+                self.hidden_param_a_value.setText(state.get("a_value", ""))
+            if hasattr(self, "hidden_param_b_value"):
+                self.hidden_param_b_value.setText(state.get("b_value", ""))
+            if hasattr(self, "hidden_param_apply_existing"):
+                self.hidden_param_apply_existing.setSelected(bool(state.get("apply_on_execute", True)))
+        except Exception:
+            pass
+
+    def _is_apply_hidden_param_on_execute(self):
+        return bool(
+            hasattr(self, "hidden_param_apply_existing")
+            and self.hidden_param_apply_existing.isSelected()
+        )
 
     def _get_api_signature(self, method, path):
         try:
@@ -544,7 +677,8 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
         # Trigger generation in background
         def run():
             if hasattr(self.extender, "attack_engine"):
-                self.extender.attack_engine.generate_attacks()
+                hidden_param_config = self._build_hidden_param_config()
+                self.extender.attack_engine.generate_attacks(hidden_param_config)
                 SwingUtilities.invokeLater(lambda: self.refresh_table())
 
         t = Thread(target=run)
@@ -596,6 +730,8 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
                     self.extender._callbacks,
                     self.extender._helpers,
                     llm_config,
+                    self._build_hidden_param_config(),
+                    self._is_apply_hidden_param_on_execute(),
                 )
 
                 # Clear progress
@@ -717,8 +853,11 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
                     self.extender._callbacks,
                     self.extender._helpers,
                     llm_config,
-                    50,
+                    limit,
+                    self._build_hidden_param_config(),
+                    self._is_apply_hidden_param_on_execute(),
                 )
+
                 total = summary_data.get("total", 0)
                 success_count = summary_data.get("success", 0)
                 vulnerable_count = summary_data.get("vulnerable", 0)
@@ -799,7 +938,7 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
 
             # Fetch details
             sql = (
-                "SELECT request_data, response_data, original_request_id, payload_description, llm_verification_result FROM attack_queue WHERE id = "
+                "SELECT request_data, executed_request_data, response_data, original_request_id, payload_description, llm_verification_result FROM attack_queue WHERE id = "
                 + str(attack_id)
             )
             print("[IDOR] Executing SQL: " + sql)
@@ -807,69 +946,86 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
             print("[IDOR] Query returned {} rows".format(len(rows) if rows else 0))
 
             if rows and len(rows) > 0:
-                req_data_json, res_data, orig_req_id, description, llm_result_json = (
+                req_data_json, executed_req_data, res_data, orig_req_id, description, llm_result_json = (
                     rows[0]
                 )
                 print("[IDOR] Data fetched. Orig Req ID: " + str(orig_req_id))
 
                 # Reconstruct request for display with parameter change annotations
                 try:
-                    rd = json.loads(req_data_json)
-                    print("[IDOR] Parsed request_data JSON successfully")
+                    if executed_req_data:
+                        if isinstance(executed_req_data, unicode):
+                            executed_req_data = executed_req_data.encode("utf-8")
+                        self.current_request = executed_req_data
+                        print("[IDOR] Using executed_request_data for Attack Request viewer")
+                    else:
+                        rd = json.loads(req_data_json)
+                        print("[IDOR] Parsed request_data JSON successfully")
 
-                    # Get original request data for comparison
-                    sql_orig_data = (
-                        "SELECT path, query_params, body FROM raw_requests WHERE id = "
-                        + str(orig_req_id)
-                    )
-                    print(
-                        "[IDOR] Fetching original request data for comparison, orig_req_id: "
-                        + str(orig_req_id)
-                    )
-                    orig_data_rows = self.extender.db_manager.fetch_all(sql_orig_data)
-                    print(
-                        "[IDOR] Original data query returned {} rows".format(
-                            len(orig_data_rows) if orig_data_rows else 0
+                        # Get original request data for comparison
+                        sql_orig_data = (
+                            "SELECT path, query_params, body FROM raw_requests WHERE id = "
+                            + str(orig_req_id)
                         )
-                    )
-
-                    if orig_data_rows and len(orig_data_rows) > 0:
-                        orig_path, orig_query_json, orig_body = orig_data_rows[0]
                         print(
-                            "[IDOR] Got original data: path={}, query={}, body={}".format(
-                                orig_path[:50] if orig_path else "None",
-                                orig_query_json[:50] if orig_query_json else "None",
-                                orig_body[:50] if orig_body else "None",
+                            "[IDOR] Fetching original request data for comparison, orig_req_id: "
+                            + str(orig_req_id)
+                        )
+                        orig_data_rows = self.extender.db_manager.fetch_all(sql_orig_data)
+                        print(
+                            "[IDOR] Original data query returned {} rows".format(
+                                len(orig_data_rows) if orig_data_rows else 0
                             )
                         )
-                        # Reconstruct with annotations (fallback to normal if method doesn't exist)
-                        try:
-                            if hasattr(self, "_reconstruct_request_with_annotations"):
-                                self.current_request = (
-                                    self._reconstruct_request_with_annotations(
-                                        rd,
-                                        orig_path,
-                                        orig_query_json,
-                                        orig_body,
-                                        description,
+
+                        if orig_data_rows and len(orig_data_rows) > 0:
+                            orig_path, orig_query_json, orig_body = orig_data_rows[0]
+                            print(
+                                "[IDOR] Got original data: path={}, query={}, body={}".format(
+                                    orig_path[:50] if orig_path else "None",
+                                    orig_query_json[:50] if orig_query_json else "None",
+                                    orig_body[:50] if orig_body else "None",
+                                )
+                            )
+                            # Reconstruct with annotations (fallback to normal if method doesn't exist)
+                            try:
+                                if hasattr(self, "_reconstruct_request_with_annotations"):
+                                    self.current_request = (
+                                        self._reconstruct_request_with_annotations(
+                                            rd,
+                                            orig_path,
+                                            orig_query_json,
+                                            orig_body,
+                                            description,
+                                        )
                                     )
-                                )
+                                    print(
+                                        "[IDOR] Used _reconstruct_request_with_annotations"
+                                    )
+                                else:
+                                    print(
+                                        "[IDOR] _reconstruct_request_with_annotations not found, using normal reconstruction"
+                                    )
+                                    self.current_request = (
+                                        self.extender.attack_engine.reconstruct_request(
+                                            rd, self.extender._helpers
+                                        )
+                                    )
+                            except Exception as e_annot:
                                 print(
-                                    "[IDOR] Used _reconstruct_request_with_annotations"
+                                    "[IDOR] Error in _reconstruct_request_with_annotations: "
+                                    + str(e_annot)
                                 )
-                            else:
-                                print(
-                                    "[IDOR] _reconstruct_request_with_annotations not found, using normal reconstruction"
-                                )
+                                # Fallback to normal reconstruction
                                 self.current_request = (
                                     self.extender.attack_engine.reconstruct_request(
                                         rd, self.extender._helpers
                                     )
                                 )
-                        except Exception as e_annot:
+                                print("[IDOR] Used fallback normal reconstruction")
+                        else:
                             print(
-                                "[IDOR] Error in _reconstruct_request_with_annotations: "
-                                + str(e_annot)
+                                "[IDOR] No original data found, using normal reconstruction"
                             )
                             # Fallback to normal reconstruction
                             self.current_request = (
@@ -877,17 +1033,6 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
                                     rd, self.extender._helpers
                                 )
                             )
-                            print("[IDOR] Used fallback normal reconstruction")
-                    else:
-                        print(
-                            "[IDOR] No original data found, using normal reconstruction"
-                        )
-                        # Fallback to normal reconstruction
-                        self.current_request = (
-                            self.extender.attack_engine.reconstruct_request(
-                                rd, self.extender._helpers
-                            )
-                        )
                 except Exception as e:
                     print("[IDOR] Error reconstructing request: " + str(e))
                     import traceback

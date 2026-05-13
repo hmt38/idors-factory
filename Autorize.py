@@ -126,16 +126,33 @@ class BurpExtender(IBurpExtender, IHttpListener, IProxyListener, IExtensionState
 
             self._update_auto_status("Auto IDOR: generating attacks...")
             if hasattr(self, "attack_engine"):
-                self.attack_engine.generate_attacks()
+                hidden_param_config = None
+                try:
+                    if hasattr(self, "idorAttackPanel") and self.idorAttackPanel:
+                        hidden_param_config = self.idorAttackPanel._build_hidden_param_config()
+                except Exception:
+                    hidden_param_config = None
+                self.attack_engine.generate_attacks(hidden_param_config)
 
             self._update_auto_status("Auto IDOR: executing pending GET attacks...")
             summary = {"total": 0, "success": 0, "failed": 0, "vulnerable": 0}
             if hasattr(self, "attack_engine"):
+                hidden_param_config = None
+                apply_hidden_param_on_execute = False
+                try:
+                    if hasattr(self, "idorAttackPanel") and self.idorAttackPanel:
+                        hidden_param_config = self.idorAttackPanel._build_hidden_param_config()
+                        apply_hidden_param_on_execute = self.idorAttackPanel._is_apply_hidden_param_on_execute()
+                except Exception:
+                    hidden_param_config = None
+                    apply_hidden_param_on_execute = False
                 summary = self.attack_engine.execute_pending_get_attacks(
                     self._callbacks,
                     self._helpers,
                     self._get_llm_config(),
                     50,
+                    hidden_param_config,
+                    apply_hidden_param_on_execute,
                 )
 
             summary_text = "Auto IDOR: cycle complete - {}/{} executed, {} vulnerable, {} failed".format(
