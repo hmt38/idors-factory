@@ -624,25 +624,13 @@ def apply_user_rules_to_request_components(self, request_line, header_lines, bod
     user_header_pairs = parse_header_lines(user_headers_text)
     queryFlag = self.replaceQueryParam.isSelected()
 
-    if apply_user_header_text and (user_header_pairs or user_headers_text):
-        if queryFlag:
-            if user_headers_text:
-                param = user_headers_text.split("=")
-                if len(param) >= 2:
-                    paramKey = param[0]
-                    paramValue = "=".join(param[1:])
-                    headers[0] = _set_query_param_in_request_line(headers[0], paramKey, paramValue)
-        else:
-            removeHeaderNames = [name.lower() + ':' for name, value in user_header_pairs]
-            if removeHeaderNames:
-                headers = [headers[0]] + [
-                    header for header in headers[1:]
-                    if not any(header.lower().startswith(removeHeader) for removeHeader in removeHeaderNames)
-                ]
-
-    if apply_user_header_text and user_header_pairs and not queryFlag:
-        for name, value in user_header_pairs:
-            headers = [headers[0]] + upsert_header(headers[1:], name, value)
+    if apply_user_header_text and queryFlag:
+        if user_headers_text:
+            param = user_headers_text.split("=")
+            if len(param) >= 2:
+                paramKey = param[0]
+                paramValue = "=".join(param[1:])
+                headers[0] = _set_query_param_in_request_line(headers[0], paramKey, paramValue)
 
     for i in range(mr_model.getSize() if mr_model else 0):
         rule_key = mr_model.getElementAt(i)
@@ -674,6 +662,10 @@ def apply_user_rules_to_request_components(self, request_line, header_lines, bod
                     headers[0] = _set_query_param_in_request_line(
                         headers[0], query_name, replace_pattern
                     )
+
+    if apply_user_header_text and user_header_pairs and not queryFlag:
+        for name, value in user_header_pairs:
+            headers = [headers[0]] + upsert_header(headers[1:], name, value)
 
     if body_text is None:
         body_text = ""

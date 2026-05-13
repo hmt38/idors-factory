@@ -10,6 +10,7 @@ from javax.swing import JTextArea
 from javax.swing import JScrollPane
 from javax.swing import GroupLayout
 from javax.swing.border import LineBorder
+from javax.swing.event import DocumentListener
 from java.awt import BorderLayout
 from java.awt import FlowLayout
 from java.awt import Color
@@ -18,6 +19,19 @@ from java.awt.event import ActionListener
 
 from gui.enforcement_detector import EnforcementDetectors
 from gui.match_replace import MatchReplace
+
+class UserHeadersDocumentListener(DocumentListener):
+    def __init__(self, user_headers):
+        self.user_headers = user_headers
+
+    def insertUpdate(self, event):
+        self.user_headers.updateConflictWarning()
+
+    def removeUpdate(self, event):
+        self.user_headers.updateConflictWarning()
+
+    def changedUpdate(self, event):
+        self.user_headers.updateConflictWarning()
 
 class UserHeaders():
     DEFUALT_REPLACE_TEXT = "Cookie: Insert=injected; cookie=or;\nHeader: here"
@@ -40,6 +54,10 @@ class UserHeaders():
         self.scrollReplaceString = JScrollPane(self.replaceString)
         self.scrollReplaceString.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED)
         self.scrollReplaceString.setBorder(LineBorder(Color.BLACK))
+        self.replaceString.getDocument().addDocumentListener(UserHeadersDocumentListener(self))
+
+        self.conflictWarningLabel = JLabel("")
+        self.conflictWarningLabel.setForeground(Color(180, 90, 0))
 
         self.fromLastRequestLabel = JLabel("From last request:")
 
@@ -62,6 +80,7 @@ class UserHeaders():
             layout.createParallelGroup()
                 .addComponent(self.scrollReplaceString,
                     GroupLayout.DEFAULT_SIZE, GroupLayout.DEFAULT_SIZE, 2147483647)
+                .addComponent(self.conflictWarningLabel)
                 .addComponent(self.fromLastRequestLabel)
                 .addGroup(layout.createSequentialGroup()
                     .addComponent(self.fetchCookiesHeaderButton)
@@ -76,6 +95,7 @@ class UserHeaders():
             layout.createSequentialGroup()
                 .addComponent(self.scrollReplaceString,
                     GroupLayout.PREFERRED_SIZE, GroupLayout.PREFERRED_SIZE, GroupLayout.PREFERRED_SIZE)
+                .addComponent(self.conflictWarningLabel)
                 .addComponent(self.fromLastRequestLabel)
                 .addGroup(layout.createParallelGroup(GroupLayout.Alignment.BASELINE)
                     .addComponent(self.fetchCookiesHeaderButton)
@@ -86,6 +106,79 @@ class UserHeaders():
                 .addComponent(self.scrollUserIdentifier,
                     GroupLayout.PREFERRED_SIZE, 30, GroupLayout.PREFERRED_SIZE)
         )
+
+    def _parse_header_names(self, header_text):
+        names = []
+        if not header_text:
+            return names
+
+        for line in header_text.split("\n"):
+            line = line.strip()
+            if not line or ":" not in line:
+                continue
+            name = line.split(":", 1)[0].strip().lower()
+            if name:
+                names.append(name)
+        return names
+
+    def updateConflictWarning(self):
+        try:
+            user_tab = getattr(self._extender, 'userTab', None)
+            if not user_tab:
+                self.conflictWarningLabel.setText("")
+                return
+
+            current_user_data = None
+            for user_id, user_data in user_tab.user_tabs.items():
+                if user_data.get('headers_instance') is self:
+                    current_user_data = user_data
+                    break
+
+            if not current_user_data:
+                self.conflictWarningLabel.setText("")
+                return
+
+            mr_instance = current_user_data.get('mr_instance')
+            if not mr_instance:
+                self.conflictWarningLabel.setText("")
+                return
+
+            header_names = set(self._parse_header_names(self.replaceString.getText()))
+            if not header_names:
+                self.conflictWarningLabel.setText("")
+                return
+
+            conflicting = []
+            for i in range(mr_instance.MRModel.getSize()):
+                rule_key = mr_instance.MRModel.getElementAt(i)
+                rule_data = mr_instance.badProgrammerMRModel.get(rule_key)
+                if not rule_data:
+                    try:
+                        rule_data = mr_instance.badProgrammerMRModel.get(str(rule_key))
+                    except Exception:
+                        rule_data = None
+                if not rule_data:
+                    continue
+
+                rule_type = rule_data.get('type')
+                if rule_type == 'Header Add/Set:':
+                    header_name = rule_data.get('match', '').strip().lower()
+                    if header_name and header_name in header_names:
+                        conflicting.append(rule_data.get('match', '').strip())
+                elif rule_type in ('Headers (simple string):', 'Headers (regex):'):
+                    match_text = rule_data.get('match', '') or ''
+                    for header_name in header_names:
+                        if header_name in match_text.lower() and header_name not in conflicting:
+                            conflicting.append(header_name)
+
+            if conflicting:
+                self.conflictWarningLabel.setText(
+                    'Warning: Users headers may override MR header rules for: ' + ', '.join(conflicting[:5])
+                )
+            else:
+                self.conflictWarningLabel.setText("")
+        except Exception:
+            self.conflictWarningLabel.setText("")
 
     def fetchCookiesHeader(self, event):
         if self._extender.lastCookiesHeader:
@@ -160,6 +253,9 @@ class UserTab():
         
         user_mr = UserMatchReplace(self.user_count)
         user_mr.draw()
+        user_mr.owner_headers_instance = user_headers
+        user_mr.isolated_extender.owner_headers_instance = user_headers
+        user_headers.updateConflictWarning()
         
         userSubTabs.addTab("Headers", user_headers.headersPnl)
         userSubTabs.addTab("Enforcement Detector", user_ed.EDPnl)
@@ -268,6 +364,7 @@ class UserTab():
 
     def copy_headers_settings(self, source_headers, target_headers):
         target_headers.replaceString.setText(source_headers.replaceString.getText())
+        target_headers.updateConflictWarning()
 
     def copy_mr_settings(self, source_mr, target_mr):
         target_mr.MRModel.clear()
@@ -286,6 +383,9 @@ class UserTab():
                 target_mr.badProgrammerMRModel[key] = dict(value)
             else:
                 target_mr.badProgrammerMRModel[key] = value
+        owner_headers = getattr(target_mr, 'owner_headers_instance', None)
+        if owner_headers and hasattr(owner_headers, 'updateConflictWarning'):
+            owner_headers.updateConflictWarning()
                             
     def rename_user(self):
         selected_index = self.userTabs.getSelectedIndex()

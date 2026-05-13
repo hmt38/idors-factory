@@ -18,6 +18,14 @@ import re
 class MatchReplace():
     def __init__(self, extender):
         self._extender = extender
+
+    def _notify_header_conflict_state(self):
+        try:
+            owner_headers = getattr(self._extender, 'owner_headers_instance', None)
+            if owner_headers and hasattr(owner_headers, 'updateConflictWarning'):
+                owner_headers.updateConflictWarning()
+        except Exception:
+            pass
     
     def draw(self):
         """ init the match/replace tab
@@ -300,6 +308,7 @@ class MatchReplace():
         self._extender.MText.setText("")
         self._extender.RText.setText("")
         self._extender.MRFeedback.setText("")
+        self._notify_header_conflict_state()
 
     def delMRFilter(self, event):
         index = self._extender.MRList.getSelectedIndex()
@@ -307,6 +316,7 @@ class MatchReplace():
             key = self._extender.MRList.getSelectedValue()
             del self._extender.badProgrammerMRModel[key]
             self._extender.MRList.getModel().remove(index)
+            self._notify_header_conflict_state()
     
     def modMRFilter(self, event):
         index = self._extender.MRList.getSelectedIndex()
