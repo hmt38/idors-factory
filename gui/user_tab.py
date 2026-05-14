@@ -19,6 +19,7 @@ from java.awt.event import ActionListener
 
 from gui.enforcement_detector import EnforcementDetectors
 from gui.match_replace import MatchReplace
+from gui.param_recommender import UserParamRecommenderPanel
 
 class UserHeadersDocumentListener(DocumentListener):
     def __init__(self, user_headers):
@@ -256,10 +257,13 @@ class UserTab():
         user_mr.owner_headers_instance = user_headers
         user_mr.isolated_extender.owner_headers_instance = user_headers
         user_headers.updateConflictWarning()
-        
+
+        user_recommender = UserParamRecommenderPanel(self._extender, self, self.user_count)
+
         userSubTabs.addTab("Headers", user_headers.headersPnl)
         userSubTabs.addTab("Enforcement Detector", user_ed.EDPnl)
         userSubTabs.addTab("Match/Replace", user_mr.MRPnl)
+        userSubTabs.addTab("Param Recommender", user_recommender)
         
         userPanel.add(headerPanel, BorderLayout.NORTH)
         userPanel.add(userSubTabs, BorderLayout.CENTER)
@@ -272,6 +276,7 @@ class UserTab():
             'headers_instance': user_headers,
             'ed_instance': user_ed,
             'mr_instance': user_mr,
+            'recommender_instance': user_recommender,
             'header_label': headerLabel
         }
         
