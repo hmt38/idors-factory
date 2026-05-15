@@ -38,8 +38,12 @@ class ParameterExtractor:
             "SELECT id, method, host, url, path, query_params, body, user_identifier FROM raw_requests WHERE is_analyzed = 0 LIMIT 50"
         )
 
+        print("[Extractor] Fetched {} unanalyzed requests.".format(len(rows or [])))
         if not rows:
+            print("[Extractor] No unanalyzed requests to process.")
             return
+
+        total_saved = 0
 
         # Initialize LLM Helper if enabled
         extender = getattr(self.db_manager, "extender", None)
@@ -65,6 +69,7 @@ class ParameterExtractor:
 
         # Step 2: Process data without holding an open cursor to the table we are reading from
         for row in rows:
+            req_id = "unknown"
             try:
                 (
                     req_id,
@@ -86,6 +91,7 @@ class ParameterExtractor:
                     + path
                     + ")"
                 )
+                request_saved = 0
 
                 api_signature = self._generate_api_signature(method, host, path)
 
@@ -95,14 +101,15 @@ class ParameterExtractor:
                         q_params = json.loads(query_params_json)
                         if q_params:
                             for k, v in q_params.items():
-                                self._save_param(
+                                if self._save_param(
                                     api_signature,
                                     k,
                                     v,
                                     "QUERY",
                                     user_identifier,
                                     req_id,
-                                )
+                                ):
+                                    request_saved += 1
                     except Exception as e:
                         print("[Extractor] Error parsing query params: " + str(e))
 
@@ -111,7 +118,7 @@ class ParameterExtractor:
                 if body and body.strip().startswith("{"):
                     try:
                         body_json = json.loads(body)
-                        self._extract_json_params(
+                        request_saved += self._extract_json_params(
                             api_signature, body_json, user_identifier, req_id
                         )
                     except ValueError:
@@ -121,7 +128,7 @@ class ParameterExtractor:
                         print("[Extractor] Error parsing body params: " + str(e))
 
                 # 3. Extract Path Params (Heuristic: Numeric IDs or UUIDs)
-                self._extract_path_params(api_signature, path, user_identifier, req_id)
+                request_saved += self._extract_path_params(api_signature, path, user_identifier, req_id)
 
                 # LLM Extraction
                 if llm_helper:
@@ -142,14 +149,15 @@ class ParameterExtractor:
                             llm_params = llm_helper.extract_params(req_data_for_llm)
                             for p in llm_params:
                                 # Ensure correct arg order: api_sig, name, value, location, user, req_id
-                                self._save_param(
+                                if self._save_param(
                                     api_signature,
                                     p["name"],
                                     p["value"],
                                     "LLM_" + p["type"],
                                     user_identifier,
                                     req_id,
-                                )
+                                ):
+                                    request_saved += 1
                         except Exception as e_llm_ex:
                             print("[Extractor] LLM Extraction Error: " + str(e_llm_ex))
                             import traceback
@@ -168,14 +176,15 @@ class ParameterExtractor:
                             )
                             for fv in fuzzed_values:
                                 # Save with special user "LLM-Fuzzer"
-                                self._save_param(
+                                if self._save_param(
                                     api_signature,
                                     fv["name"],
                                     fv["value"],
                                     "LLM_Gen",
                                     "LLM-Fuzzer",
                                     req_id,
-                                )
+                                ):
+                                    request_saved += 1
                         except Exception as e_llm_gen:
                             print("[Extractor] LLM Generation Error: " + str(e_llm_gen))
                             import traceback
@@ -187,6 +196,12 @@ class ParameterExtractor:
                     "UPDATE raw_requests SET is_analyzed = 1, analyzed_at = CURRENT_TIMESTAMP WHERE id = "
                     + str(req_id)
                 )
+                total_saved += request_saved
+                print(
+                    "[Extractor] Request ID {} extraction complete: {} params saved.".format(
+                        req_id, request_saved
+                    )
+                )
             except Exception as e:
                 print(
                     "[Extractor] Error processing request {}: {}".format(req_id, str(e))
@@ -194,6 +209,12 @@ class ParameterExtractor:
                 import traceback
 
                 traceback.print_exc()
+
+        print(
+            "[Extractor] Extraction batch complete: {} requests processed, {} params saved.".format(
+                len(rows), total_saved
+            )
+        )
 
     def _generate_api_signature(self, method, host, path):
         # Normalize path to generate a signature
@@ -217,6 +238,7 @@ class ParameterExtractor:
         return method + " " + host + normalized_path
 
     def _extract_path_params(self, api_signature, path, user_identifier, req_id):
+        saved_count = 0
         parts = path.split("/")
         for i, part in enumerate(parts):
             param_type = None
@@ -235,48 +257,53 @@ class ParameterExtractor:
             # If this is a parameter, generate semantic name
             if param_type:
                 param_name = self._generate_param_name(parts, i, param_type)
-                self._save_param(
+                if self._save_param(
                     api_signature,
                     param_name,
                     param_value,
                     "PATH",
                     user_identifier,
                     req_id,
-                )
+                ):
+                    saved_count += 1
                 print(
                     "[Extractor] Extracted path param: {} = {} (type: {})".format(
                         param_name, param_value, param_type
                     )
                 )
+        return saved_count
 
     def _extract_json_params(
         self, api_signature, json_obj, user_identifier, req_id, prefix=""
     ):
+        saved_count = 0
         if isinstance(json_obj, dict):
             for k, v in json_obj.items():
                 key_name = prefix + k if prefix else k
-                self._extract_json_params(
+                saved_count += self._extract_json_params(
                     api_signature, v, user_identifier, req_id, key_name + "."
                 )
         elif isinstance(json_obj, list):
             # For lists, we can try to extract from items if they are primitives or dicts
             for i, item in enumerate(json_obj):
                 key_name = prefix + str(i)
-                self._extract_json_params(
+                saved_count += self._extract_json_params(
                     api_signature, item, user_identifier, req_id, key_name + "."
                 )
         else:
             # Leaf node (string, int, bool, etc.)
             # Remove trailing dot from prefix
             param_name = prefix.rstrip(".")
-            self._save_param(
+            if self._save_param(
                 api_signature,
                 param_name,
                 str(json_obj),
                 "BODY_JSON",
                 user_identifier,
                 req_id,
-            )
+            ):
+                saved_count += 1
+        return saved_count
 
     def _save_param(
         self, api_signature, name, value, location, user_identifier, req_id
@@ -285,11 +312,13 @@ class ParameterExtractor:
         # For now, save everything that looks like an ID or sensitive data.
         # Or save everything to allow full permutation.
         if not value:
-            return
+            print("[Extractor] Skipping empty value for param '{}' in request {}.".format(name, req_id))
+            return False
 
         # Check blacklist
         if self._is_blacklisted(name):
-            return
+            print("[Extractor] Skipping blacklisted param '{}' in request {}.".format(name, req_id))
+            return False
 
         # Ensure proper encoding for Chinese characters
         try:
@@ -313,7 +342,21 @@ class ParameterExtractor:
         # Use execute_query (which handles connection and commit)
         # Note: execute_query handles connection open/close internally for each call.
         # This might be slow for many params. But for safety against locking, it's better.
-        self.db_manager.execute_query(sql, params)
+        result = self.db_manager.execute_query(sql, params)
+        if result:
+            print(
+                "[Extractor] Saved param: request_id={}, user={}, location={}, name={}, score={}".format(
+                    req_id, user_identifier, location, name, risk_score
+                )
+            )
+            return True
+
+        print(
+            "[Extractor] Failed to save param: request_id={}, user={}, location={}, name={}".format(
+                req_id, user_identifier, location, name
+            )
+        )
+        return False
 
     def calculate_risk_score(self, key, value, location):
         score = 0

@@ -3,6 +3,7 @@
 
 import json
 import re
+import traceback
 
 from javax.swing import (
     JPanel,
@@ -20,6 +21,8 @@ from javax.swing import (
 from javax.swing.table import AbstractTableModel, TableRowSorter
 from javax.swing.event import ListSelectionListener
 from java.awt import BorderLayout
+from java.lang import Runnable
+from javax.swing import SwingUtilities
 from burp import IMessageEditorController
 
 from helpers.llm_helper import LLMHelper
@@ -102,6 +105,16 @@ class RecommendationSelectionListener(ListSelectionListener):
         if event.getValueIsAdjusting():
             return
         self.panel.on_selection_change()
+
+
+class ParamRecommendRunnable(Runnable):
+    def __init__(self, panel, key, location):
+        self.panel = panel
+        self.key = key
+        self.location = location
+
+    def run(self):
+        self.panel._run_recommendation(self.key, self.location)
 
 
 class UserParamRecommenderPanel(JPanel):
@@ -187,6 +200,55 @@ class UserParamRecommenderPanel(JPanel):
         self.main_split.setDividerLocation(180)
         self.add(self.main_split, BorderLayout.CENTER)
 
+    def _log(self, message):
+        try:
+            print("[Param Recommender] " + str(message))
+        except Exception:
+            pass
+
+    def _set_status(self, message):
+        def update():
+            self.statusLabel.setText(message)
+
+        if SwingUtilities.isEventDispatchThread():
+            update()
+        else:
+            SwingUtilities.invokeLater(update)
+
+    def _set_recommend_enabled(self, enabled):
+        def update():
+            self.recommendButton.setEnabled(enabled)
+
+        if SwingUtilities.isEventDispatchThread():
+            update()
+        else:
+            SwingUtilities.invokeLater(update)
+
+    def _clear_results(self):
+        def update():
+            self.table_model.set_rows([])
+            self.selected_row = None
+            self.sourceUserLabel.setText("Source User: -")
+            self.request_viewer.setMessage(None, True)
+            self.response_viewer.setMessage(None, False)
+
+        if SwingUtilities.isEventDispatchThread():
+            update()
+        else:
+            SwingUtilities.invokeLater(update)
+
+    def _display_results(self, rows):
+        def update():
+            self.table_model.set_rows(rows)
+            if len(rows) > 0:
+                self.table.setRowSelectionInterval(0, 0)
+                self.on_selection_change()
+
+        if SwingUtilities.isEventDispatchThread():
+            update()
+        else:
+            SwingUtilities.invokeLater(update)
+
     def _get_current_user_data(self):
         return self.user_tab.user_tabs.get(self.user_id)
 
@@ -202,27 +264,69 @@ class UserParamRecommenderPanel(JPanel):
     def _looks_like_location(self, row_location, requested_location):
         if not requested_location or requested_location == "Auto":
             return True
-        return (row_location or "").upper() == requested_location.upper()
+        row_location = (row_location or "").upper()
+        requested_location = requested_location.upper()
+        if row_location == requested_location:
+            return True
+        if requested_location == "BODY":
+            return "BODY" in row_location
+        if requested_location == "QUERY":
+            return "QUERY" in row_location or row_location == "PARAM_URL"
+        if requested_location == "HEADER":
+            return "HEADER" in row_location
+        if requested_location == "PATH":
+            return "PATH" in row_location
+        return False
+
+    def _to_text(self, value):
+        if value is None:
+            return ""
+        try:
+            if isinstance(value, basestring):
+                return value
+        except Exception:
+            pass
+        try:
+            return self.extender._helpers.bytesToString(value)
+        except Exception:
+            try:
+                return str(value)
+            except Exception:
+                return ""
 
     def _fetch_candidates(self, key, requested_location):
+        if not hasattr(self.extender, "db_manager") or not self.extender.db_manager:
+            self._log("Database manager is not initialized; cannot search parameter_pool.")
+            return []
+
         normalized = self._normalize_key(key)
         sql = "SELECT api_signature, param_name, param_value, location, user_identifier, risk_score, llm_analysis_result FROM parameter_pool"
+        self._log("Searching parameter_pool for key='{}', normalized='{}', location='{}', current_user='{}'".format(
+            key, normalized, requested_location, self._get_current_user_name()
+        ))
         rows = self.extender.db_manager.fetch_all(sql)
+        self._log("parameter_pool returned {} total rows before filtering.".format(len(rows or [])))
         candidates = []
         current_user_name = self._get_current_user_name()
+        skipped_same_user = 0
+        skipped_location = 0
+        skipped_key = 0
 
         for row in rows or []:
             api_signature, param_name, param_value, location, source_user, risk_score, llm_analysis_result = row
             if not param_name or not param_value or not source_user:
                 continue
             if current_user_name and str(source_user).strip().lower() == str(current_user_name).strip().lower():
+                skipped_same_user += 1
                 continue
             if not self._looks_like_location(location, requested_location):
+                skipped_location += 1
                 continue
 
             exact = str(param_name).strip().lower() == str(key).strip().lower()
             normalized_match = self._normalize_key(param_name) == normalized
             if not exact and not normalized_match:
+                skipped_key += 1
                 continue
 
             method = ""
@@ -255,6 +359,11 @@ class UserParamRecommenderPanel(JPanel):
             })
 
         candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
+        self._log(
+            "Candidate filter complete: matched={}, skipped_same_user={}, skipped_location={}, skipped_key={}.".format(
+                len(candidates), skipped_same_user, skipped_location, skipped_key
+            )
+        )
         return candidates[:10]
 
     def _find_evidence_for_candidate(self, candidate):
@@ -271,6 +380,9 @@ class UserParamRecommenderPanel(JPanel):
 
         sql = "SELECT method, url, headers, query_params, body, response_headers, response_body, user_identifier, path FROM raw_requests WHERE user_identifier = ? ORDER BY id DESC"
         rows = self.extender.db_manager.fetch_all(sql, (source_user,))
+        self._log("Searching evidence for {}={} from user '{}': {} raw rows.".format(
+            param_name, param_value, source_user, len(rows or [])
+        ))
 
         best = None
         best_score = -1
@@ -289,7 +401,7 @@ class UserParamRecommenderPanel(JPanel):
                 query_params = json.loads(query_json) if query_json else {}
             except Exception:
                 query_params = {}
-            body_text = self.extender._helpers.bytesToString(body) if body else ""
+            body_text = self._to_text(body)
 
             matched = False
             if requested_location == "HEADER":
@@ -338,7 +450,7 @@ class UserParamRecommenderPanel(JPanel):
                 response_headers = json.loads(response_headers_json) if response_headers_json else []
             except Exception:
                 response_headers = []
-            response_body_text = self.extender._helpers.bytesToString(response_body) if response_body else ""
+            response_body_text = self._to_text(response_body)
             response_text = "{}\n\n{}".format("\n".join(response_headers), response_body_text)
 
             if response_body_text and str(param_value) in response_body_text:
@@ -353,6 +465,10 @@ class UserParamRecommenderPanel(JPanel):
                     "method": method,
                 }
 
+        if best:
+            self._log("Evidence matched for {}={} with score {}.".format(param_name, param_value, best_score))
+        else:
+            self._log("No evidence matched for {}={} from user '{}'.".format(param_name, param_value, source_user))
         return best
 
     def _build_reason(self, candidate):
@@ -366,11 +482,15 @@ class UserParamRecommenderPanel(JPanel):
         if not candidates:
             return candidates
         if not hasattr(self.extender, 'enableLlm') or not self.extender.enableLlm.isSelected():
+            self._log("LLM reranking skipped: global LLM analysis is disabled.")
             return candidates
         if not self.useLlmCheck.isSelected():
+            self._log("LLM reranking skipped: panel checkbox is disabled.")
             return candidates
 
         try:
+            self._set_status("Reranking recommendations with LLM...")
+            self._log("LLM reranking started for {} enriched candidates.".format(len(candidates)))
             llm = LLMHelper(
                 self.extender.llmBaseUrl.getText(),
                 self.extender.llmApiKey.getText(),
@@ -417,10 +537,13 @@ Candidates:
                 candidate["reason"] = item.get("reason", candidate.get("reason", ""))
                 results.append(candidate)
             if results:
+                self._log("LLM reranking returned {} usable results.".format(len(results)))
                 return results[:3]
         except Exception as e:
             print("[Param Recommender] LLM rerank failed: " + str(e))
+            traceback.print_exc()
 
+        self._log("Falling back to local ranking.")
         return candidates[:3]
 
     def recommend(self, event):
@@ -430,43 +553,65 @@ Candidates:
             return
 
         location = str(self.locationCombo.getSelectedItem())
-        self.statusLabel.setText("Searching parameter pool...")
-        candidates = self._fetch_candidates(key, location)
-        if not candidates:
-            self.table_model.set_rows([])
-            self.selected_row = None
-            self.sourceUserLabel.setText("Source User: -")
-            self.request_viewer.setMessage(None, True)
-            self.response_viewer.setMessage(None, False)
-            self.statusLabel.setText("No candidate values found in parameter_pool.")
-            return
+        self._log("Recommend Top 3 clicked: user_id={}, user_name='{}', key='{}', location='{}'.".format(
+            self.user_id, self._get_current_user_name(), key, location
+        ))
+        self._set_status("Searching parameter pool...")
+        self._set_recommend_enabled(False)
+        if hasattr(self.extender, "executor") and self.extender.executor:
+            self.extender.executor.submit(ParamRecommendRunnable(self, key, location))
+        else:
+            self._log("Executor is not available; running recommendation on current thread.")
+            self._run_recommendation(key, location)
 
-        enriched = []
-        for candidate in candidates:
-            evidence = self._find_evidence_for_candidate(candidate)
-            if not evidence:
-                continue
-            candidate = dict(candidate)
-            candidate.update(evidence)
-            candidate["reason"] = self._build_reason(candidate)
-            enriched.append(candidate)
+    def _run_recommendation(self, key, location):
+        try:
+            if not hasattr(self.extender, "db_manager") or not self.extender.db_manager:
+                self._clear_results()
+                self._set_status("Database manager is not initialized yet. Try again after initialization completes.")
+                self._log("Recommendation aborted because DatabaseManager is not initialized.")
+                return
 
-        if not enriched:
-            self.table_model.set_rows([])
-            self.statusLabel.setText("Candidates found, but no source request/response evidence was matched.")
-            return
+            candidates = self._fetch_candidates(key, location)
+            if not candidates:
+                self._clear_results()
+                self._set_status("No candidate values found in parameter_pool. Run Extract Params first if the pool is empty.")
+                return
 
-        ranked = self._rerank_with_llm(key, location, enriched)
-        if not ranked:
-            ranked = enriched[:3]
-        ranked = ranked[:3]
-        for idx, row in enumerate(ranked):
-            row["rank"] = idx + 1
-        self.table_model.set_rows(ranked)
-        self.statusLabel.setText("Found {} recommendations.".format(len(ranked)))
-        if len(ranked) > 0:
-            self.table.setRowSelectionInterval(0, 0)
-            self.on_selection_change()
+            enriched = []
+            for candidate in candidates:
+                evidence = self._find_evidence_for_candidate(candidate)
+                if not evidence:
+                    continue
+                candidate = dict(candidate)
+                candidate.update(evidence)
+                candidate["reason"] = self._build_reason(candidate)
+                enriched.append(candidate)
+            self._log("Evidence enrichment complete: {}/{} candidates matched.".format(
+                len(enriched), len(candidates)
+            ))
+
+            if not enriched:
+                self._clear_results()
+                self._set_status("Candidates found, but no source request/response evidence was matched.")
+                return
+
+            ranked = self._rerank_with_llm(key, location, enriched)
+            if not ranked:
+                ranked = enriched[:3]
+            ranked = ranked[:3]
+            for idx, row in enumerate(ranked):
+                row["rank"] = idx + 1
+            self._display_results(ranked)
+            self._set_status("Found {} recommendations.".format(len(ranked)))
+            self._log("Recommendation complete: {} rows displayed.".format(len(ranked)))
+        except Exception as e:
+            self._clear_results()
+            self._set_status("Recommendation failed: " + str(e))
+            self._log("Recommendation failed: " + str(e))
+            traceback.print_exc()
+        finally:
+            self._set_recommend_enabled(True)
 
     def on_selection_change(self):
         view_row = self.table.getSelectedRow()
