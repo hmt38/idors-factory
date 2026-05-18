@@ -31,7 +31,8 @@ from helpers.llm_helper import LLMHelper
 class RecommendationTableModel(AbstractTableModel):
     columns = [
         "Rank",
-        "Key",
+        "Target Key",
+        "Pool Key",
         "Suggested Value",
         "Source User",
         "Location",
@@ -61,6 +62,7 @@ class RecommendationTableModel(AbstractTableModel):
         mapping = [
             row.get("rank", ""),
             row.get("key", ""),
+            row.get("param_name", ""),
             row.get("value", ""),
             row.get("source_user", ""),
             row.get("location", ""),
@@ -261,6 +263,132 @@ class UserParamRecommenderPanel(JPanel):
             return ""
         return re.sub(r"[^a-z0-9]", "", key.lower())
 
+    def _split_key_tokens(self, key, strip_generic=True):
+        if not key:
+            return []
+
+        key_text = str(key)
+        key_text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", key_text)
+        key_text = re.sub(r"[^A-Za-z0-9]+", " ", key_text)
+
+        raw_tokens = []
+        for token in key_text.lower().split():
+            token = self._normalize_token(token)
+            if not token:
+                continue
+            raw_tokens.extend(self._expand_compound_token(token))
+
+        tokens = []
+        for token in raw_tokens:
+            token = self._normalize_token(token)
+            if token:
+                tokens.append(token)
+
+        if strip_generic and len(tokens) > 1:
+            generic = set([
+                "x",
+                "http",
+                "https",
+                "header",
+                "hdr",
+                "param",
+                "parameter",
+                "request",
+                "req",
+                "value",
+                "val",
+            ])
+            tokens = [t for t in tokens if t not in generic]
+
+        return tokens
+
+    def _expand_compound_token(self, token):
+        if not token:
+            return []
+        if token.endswith("uuid") and len(token) > 4:
+            return [token[:-4], "uuid"]
+        if token.endswith("guid") and len(token) > 4:
+            return [token[:-4], "guid"]
+        if token.endswith("id") and len(token) > 2:
+            return [token[:-2], "id"]
+        return [token]
+
+    def _normalize_token(self, token):
+        if not token:
+            return ""
+
+        token = token.lower().strip()
+        synonyms = {
+            "identifier": "id",
+            "ident": "id",
+            "uid": "id",
+            "uuid": "id",
+            "guid": "id",
+            "acct": "account",
+            "accounts": "account",
+            "usr": "user",
+            "users": "user",
+            "domains": "domain",
+            "org": "organization",
+            "organisation": "organization",
+        }
+        if token in synonyms:
+            return synonyms[token]
+
+        if token.endswith("ies") and len(token) > 4:
+            return token[:-3] + "y"
+        if token.endswith("s") and len(token) > 3 and not token.endswith("ss"):
+            return token[:-1]
+        return token
+
+    def _semantic_key_score(self, target_key, pool_key):
+        target_norm = self._normalize_key(target_key)
+        pool_norm = self._normalize_key(pool_key)
+
+        if not target_norm or not pool_norm:
+            return 0, "empty key"
+
+        if str(target_key).strip().lower() == str(pool_key).strip().lower():
+            return 100, "exact key match"
+        if target_norm == pool_norm:
+            return 96, "normalized key match"
+
+        target_tokens = self._split_key_tokens(target_key, True)
+        pool_tokens = self._split_key_tokens(pool_key, True)
+        target_core = "".join(target_tokens)
+        pool_core = "".join(pool_tokens)
+
+        if target_core and target_core == pool_core:
+            return 92, "same key tokens after removing generic prefixes"
+        if target_core and pool_core and (target_core.endswith(pool_core) or pool_core.endswith(target_core)):
+            return 86, "one key is a suffix of the other after token normalization"
+        if target_norm.endswith(pool_norm) or pool_norm.endswith(target_norm):
+            return 82, "one normalized key is a suffix of the other"
+
+        target_set = set(target_tokens)
+        pool_set = set(pool_tokens)
+        if not target_set or not pool_set:
+            return 0, "no comparable key tokens"
+
+        shared = target_set.intersection(pool_set)
+        if not shared:
+            return 0, "no shared key tokens"
+
+        union = target_set.union(pool_set)
+        jaccard = float(len(shared)) / float(len(union))
+        score = int(35 + (jaccard * 50))
+
+        if target_set.issubset(pool_set) or pool_set.issubset(target_set):
+            score = max(score, 78)
+
+        important_shared = [t for t in shared if t not in set(["id", "key", "code", "token"])]
+        if important_shared and "id" in shared:
+            score = max(score, 84)
+        elif important_shared:
+            score = max(score, 70)
+
+        return min(score, 90), "shared semantic tokens: " + ", ".join(sorted(shared))
+
     def _looks_like_location(self, row_location, requested_location):
         if not requested_location or requested_location == "Auto":
             return True
@@ -309,7 +437,7 @@ class UserParamRecommenderPanel(JPanel):
         candidates = []
         current_user_name = self._get_current_user_name()
         skipped_same_user = 0
-        skipped_location = 0
+        location_mismatch = 0
         skipped_key = 0
 
         for row in rows or []:
@@ -319,13 +447,15 @@ class UserParamRecommenderPanel(JPanel):
             if current_user_name and str(source_user).strip().lower() == str(current_user_name).strip().lower():
                 skipped_same_user += 1
                 continue
-            if not self._looks_like_location(location, requested_location):
-                skipped_location += 1
-                continue
+
+            location_match = self._looks_like_location(location, requested_location)
+            if not location_match:
+                location_mismatch += 1
 
             exact = str(param_name).strip().lower() == str(key).strip().lower()
             normalized_match = self._normalize_key(param_name) == normalized
-            if not exact and not normalized_match:
+            key_similarity, key_match_reason = self._semantic_key_score(key, param_name)
+            if key_similarity < 30:
                 skipped_key += 1
                 continue
 
@@ -338,12 +468,16 @@ class UserParamRecommenderPanel(JPanel):
                     pass
 
             score = int(risk_score or 0)
+            score = key_similarity + min(score / 5, 20)
             if exact:
-                score += 50
+                score = max(score, 100)
             elif normalized_match:
-                score += 30
-            if location and requested_location != "Auto" and location.upper() == requested_location.upper():
+                score = max(score, 96)
+            if location_match and requested_location != "Auto":
                 score += 10
+            elif not location_match and requested_location != "Auto":
+                score -= 10
+            score = max(0, min(int(score), 100))
 
             candidates.append({
                 "key": key,
@@ -355,16 +489,18 @@ class UserParamRecommenderPanel(JPanel):
                 "method": method,
                 "endpoint": endpoint,
                 "score": score,
+                "key_similarity": key_similarity,
+                "key_match_reason": key_match_reason,
                 "llm_analysis_result": llm_analysis_result,
             })
 
         candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
         self._log(
-            "Candidate filter complete: matched={}, skipped_same_user={}, skipped_location={}, skipped_key={}.".format(
-                len(candidates), skipped_same_user, skipped_location, skipped_key
+            "Candidate filter complete: matched={}, skipped_same_user={}, location_mismatch={}, skipped_key={}.".format(
+                len(candidates), skipped_same_user, location_mismatch, skipped_key
             )
         )
-        return candidates[:10]
+        return candidates[:30]
 
     def _find_evidence_for_candidate(self, candidate):
         source_user = candidate.get("source_user")
@@ -474,8 +610,13 @@ class UserParamRecommenderPanel(JPanel):
     def _build_reason(self, candidate):
         location = candidate.get("location") or "UNKNOWN"
         endpoint = candidate.get("endpoint") or candidate.get("api_signature") or ""
-        return "Matched {} candidate from {} traffic on {}".format(
-            location, candidate.get("source_user", "unknown"), endpoint
+        return "Target key '{}' matched pool key '{}' ({}). {} candidate from {} traffic on {}".format(
+            candidate.get("key", ""),
+            candidate.get("param_name", ""),
+            candidate.get("key_match_reason", "semantic match"),
+            location,
+            candidate.get("source_user", "unknown"),
+            endpoint
         )
 
     def _rerank_with_llm(self, key, location, candidates):
@@ -500,20 +641,25 @@ class UserParamRecommenderPanel(JPanel):
             for idx, candidate in enumerate(candidates):
                 prompt_candidates.append({
                     "index": idx,
-                    "key": key,
+                    "target_key": key,
+                    "pool_key": candidate.get("param_name"),
                     "value": candidate.get("value"),
                     "source_user": candidate.get("source_user"),
                     "location": candidate.get("location"),
                     "endpoint": candidate.get("endpoint"),
                     "score": candidate.get("score"),
+                    "local_key_similarity": candidate.get("key_similarity"),
+                    "local_reason": candidate.get("key_match_reason"),
                 })
 
-            prompt = """You are helping rank candidate parameter values for authorization/IDOR testing.
-Given a target key and up to 10 candidates, return ONLY a JSON list of up to 3 objects.
+            prompt = """You are helping rank candidate parameter keys for authorization/IDOR testing.
+Given a target key and candidate keys from a parameter pool, choose the top 3 candidates whose pool_key is semantically closest to the target key and useful for IDOR testing.
+Treat common HTTP/header prefixes as weak signals only. For example, X-Domain-id and domain_id are highly similar because both mean domain id.
+Return ONLY a JSON list of up to 3 objects.
 Each object must contain:
 - index: the candidate index from input
 - score: integer 0-100
-- reason: concise reason mentioning source user when helpful
+- reason: concise reason explaining the semantic key match and mentioning source user when helpful
 
 Target key: {key}
 Target location: {location}
@@ -645,6 +791,9 @@ Candidates:
             return
 
         location = (row.get("location") or str(self.locationCombo.getSelectedItem()) or "").upper()
+        selected_location = str(self.locationCombo.getSelectedItem()).upper()
+        if selected_location and selected_location != "AUTO":
+            location = selected_location
         if location == "HEADER":
             rule_type = "Header Add/Set:"
         else:
