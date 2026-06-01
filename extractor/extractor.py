@@ -5,6 +5,11 @@ import re
 import json
 
 try:
+    from javax.swing import SwingUtilities
+except ImportError:
+    SwingUtilities = None
+
+try:
     from urllib import unquote
 except ImportError:
     from urllib.parse import unquote
@@ -28,6 +33,26 @@ class ParameterExtractor:
             pass
         return False
 
+    def _set_progress(self, message, indeterminate=None):
+        try:
+            extender = getattr(self.db_manager, "extender", None)
+            progress_bar = getattr(extender, "progressBar", None) if extender else None
+            if not progress_bar:
+                return
+
+            def update():
+                if indeterminate is not None:
+                    progress_bar.setIndeterminate(indeterminate)
+                progress_bar.setString(message)
+                progress_bar.setStringPainted(True)
+
+            if SwingUtilities:
+                SwingUtilities.invokeLater(update)
+            else:
+                update()
+        except Exception:
+            pass
+
     def process_unanalyzed_requests(self):
         """
         Fetch unanalyzed requests from raw_requests table, extract parameters,
@@ -41,9 +66,13 @@ class ParameterExtractor:
         print("[Extractor] Fetched {} unanalyzed requests.".format(len(rows or [])))
         if not rows:
             print("[Extractor] No unanalyzed requests to process.")
+            self._set_progress("Extracting Parameters: 0/0", False)
             return
 
         total_saved = 0
+        total_requests = len(rows)
+        self._set_progress("Extracting Parameters: 0/{}".format(total_requests), False)
+
 
         # Initialize LLM Helper if enabled
         extender = getattr(self.db_manager, "extender", None)
@@ -56,6 +85,9 @@ class ParameterExtractor:
                             extender.llmBaseUrl.getText(),
                             extender.llmApiKey.getText(),
                             extender.llmModel.getText(),
+                            verify_ssl=not extender.llmDisableSslVerification.isSelected()
+                            if hasattr(extender, "llmDisableSslVerification")
+                            else True,
                         )
                         print("[Extractor] LLM Helper initialized successfully.")
                     else:
@@ -68,8 +100,9 @@ class ParameterExtractor:
             print("[Extractor] Warning: extender reference not found in db_manager.")
 
         # Step 2: Process data without holding an open cursor to the table we are reading from
-        for row in rows:
+        for index, row in enumerate(rows, 1):
             req_id = "unknown"
+
             try:
                 (
                     req_id,
@@ -91,7 +124,14 @@ class ParameterExtractor:
                     + path
                     + ")"
                 )
+                self._set_progress(
+                    "Extracting Parameters: {}/{} (Req ID {})".format(
+                        index, total_requests, req_id
+                    ),
+                    False,
+                )
                 request_saved = 0
+
 
                 api_signature = self._generate_api_signature(method, host, path)
 
@@ -215,8 +255,13 @@ class ParameterExtractor:
                 len(rows), total_saved
             )
         )
+        self._set_progress(
+            "Extracting Parameters: {}/{} complete".format(total_requests, total_requests),
+            False,
+        )
 
     def _generate_api_signature(self, method, host, path):
+
         # Normalize path to generate a signature
         # e.g. /api/user/123 -> /api/user/{id}
         # e.g. /api/domains/aa5c08daa5154160a95e891506a44184/info -> /api/domains/{md5}/info

@@ -37,11 +37,43 @@ class AttackEngine:
                     extender.llmBaseUrl.getText(),
                     extender.llmApiKey.getText(),
                     extender.llmModel.getText(),
+                    verify_ssl=not extender.llmDisableSslVerification.isSelected()
+                    if hasattr(extender, "llmDisableSslVerification")
+                    else True,
                 )
             else:
                 self.llm_helper = None
         except:
             self.llm_helper = None
+
+    def _set_progress_message(self, message, indeterminate=None):
+        try:
+            extender = getattr(self.db_manager, "extender", None)
+            progress_bar = getattr(extender, "progressBar", None) if extender else None
+            if not progress_bar:
+                return
+            from javax.swing import SwingUtilities
+
+            def update():
+                if indeterminate is not None:
+                    progress_bar.setIndeterminate(indeterminate)
+                progress_bar.setString(message)
+                progress_bar.setStringPainted(True)
+
+            SwingUtilities.invokeLater(update)
+        except Exception:
+            pass
+
+    def _get_parameter_pool_user_count(self):
+        try:
+            rows = self.db_manager.fetch_all(
+                "SELECT COUNT(DISTINCT user_identifier) FROM parameter_pool WHERE user_identifier IS NOT NULL AND user_identifier != ''"
+            )
+            if rows:
+                return int(rows[0][0] or 0)
+        except Exception as e:
+            print("[Attacker] Error checking parameter pool users: " + str(e))
+        return 0
 
     def generate_attacks(self, hidden_param_config=None):
         self._init_llm()
@@ -50,6 +82,9 @@ class AttackEngine:
         find matching parameters from other users (User B), and generate attack payloads.
         """
         print("[Attacker] Starting attack generation scan...")
+
+        parameter_pool_user_count = self._get_parameter_pool_user_count()
+        one_user_pool_warning = "参数池只识别到一个用户，请检查是否填错了cookie导致没有识别到用户，或者是没有抓到另一个用户的流量？"
 
         # 0. Global Analysis: Update risk scores based on parameter exclusivity
         try:
@@ -87,7 +122,9 @@ class AttackEngine:
 
         if not requests:
             print("[Attacker] No new requests to generate attacks for.")
-            return
+            if parameter_pool_user_count == 1:
+                self._set_progress_message(one_user_pool_warning, False)
+            return 0
 
         print("[Attacker] Processing {} potential requests...".format(len(requests)))
 
@@ -98,6 +135,7 @@ class AttackEngine:
 
         count = 0
         total = len(requests)
+        created_count = 0
 
         for req in requests:
             count += 1
@@ -114,7 +152,7 @@ class AttackEngine:
                 SwingUtilities.invokeLater(update_progress)
 
             try:
-                self._process_request(req, hidden_param_config)
+                created_count += self._process_request(req, hidden_param_config)
             except Exception as e:
                 print(
                     "[Attacker] Error processing request {}: {}".format(req_id, str(e))
@@ -125,7 +163,10 @@ class AttackEngine:
 
             # print("[Attacker] Finished processing Request ID: " + str(req_id))
 
-        print("[Attacker] Attack generation scan complete.")
+        if created_count == 0 and parameter_pool_user_count == 1:
+            self._set_progress_message(one_user_pool_warning, False)
+        print("[Attacker] Attack generation scan complete. Created {} attack queue records.".format(created_count))
+        return created_count
 
     def _update_risk_scores_based_on_exclusivity(self):
         """
@@ -247,7 +288,7 @@ class AttackEngine:
         )
 
         if not current_params:
-            return
+            return 0
 
         # Filter parameters based on risk score threshold
         # We need to fetch risk scores for these parameters
@@ -284,7 +325,7 @@ class AttackEngine:
                 )
 
         if not target_params:
-            return
+            return 0
 
         # 3. Find other users who have accessed this API
         # We need to find ONE other user to impersonate (or swap params with).
@@ -298,7 +339,7 @@ class AttackEngine:
             other_users = self.db_manager.fetch_all(sql_users)
         except Exception as e_db:
             print("[Attacker] Error fetching other users: " + str(e_db))
-            return
+            return 0
 
         if not other_users:
             # Fallback: if user_identifier is "User 1", try finding "User 2" specifically even if API sig doesn't match perfectly?
@@ -306,8 +347,9 @@ class AttackEngine:
             # Try finding ANY other user in the system to see if we have cross-user data at all.
             # But for now, just log.
             # print("[Attacker] No other users found for API: " + api_signature)
-            return
+            return 0
 
+        created_count = 0
         for user_row in other_users:
             other_user = user_row[0]
             print(
@@ -391,7 +433,10 @@ class AttackEngine:
                 combinations.append(swappable_params)
 
             for combo in combinations:
-                self._create_attack_entry_for_combination(req, combo, other_user, hidden_param_config)
+                if self._create_attack_entry_for_combination(req, combo, other_user, hidden_param_config):
+                    created_count += 1
+
+        return created_count
 
     def _create_attack_entry_for_combination(self, req, combination, target_user, hidden_param_config=None):
         (
@@ -544,8 +589,10 @@ class AttackEngine:
         try:
             self.db_manager.execute_query(sql)
             print("[Attacker] Queued attack: " + description)
+            return True
         except Exception as e_ins:
             print("[Attacker] Error inserting attack: " + str(e_ins))
+            return False
 
     def _update_json_value(self, json_obj, key_path, new_value):
         # key_path is like "user.profile.id" or "items.0.id"
@@ -1199,7 +1246,10 @@ class AttackEngine:
             # Only check if successful
             if llm_config and llm_config.get("enabled", False):
                 llm = LLMHelper(
-                    llm_config["base_url"], llm_config["api_key"], llm_config["model"]
+                    llm_config["base_url"],
+                    llm_config["api_key"],
+                    llm_config["model"],
+                    verify_ssl=llm_config.get("verify_ssl", True),
                 )
 
                 # Fetch original request string

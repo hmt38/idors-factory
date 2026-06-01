@@ -636,6 +636,9 @@ class UserParamRecommenderPanel(JPanel):
                 self.extender.llmBaseUrl.getText(),
                 self.extender.llmApiKey.getText(),
                 self.extender.llmModel.getText(),
+                verify_ssl=not self.extender.llmDisableSslVerification.isSelected()
+                if hasattr(self.extender, "llmDisableSslVerification")
+                else True,
             )
             prompt_candidates = []
             for idx, candidate in enumerate(candidates):

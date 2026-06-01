@@ -666,7 +666,24 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
         def run():
             if hasattr(self.extender, "attack_engine"):
                 hidden_param_config = self._build_hidden_param_config()
-                self.extender.attack_engine.generate_attacks(hidden_param_config)
+                created_count = self.extender.attack_engine.generate_attacks(hidden_param_config)
+                if created_count == 0:
+                    try:
+                        rows = self.extender.db_manager.fetch_all(
+                            "SELECT COUNT(DISTINCT user_identifier) FROM parameter_pool WHERE user_identifier IS NOT NULL AND user_identifier != ''"
+                        )
+                        if rows and int(rows[0][0] or 0) == 1:
+                            message = "参数池只识别到一个用户，请检查是否填错了cookie导致没有识别到用户，或者是没有抓到另一个用户的流量？"
+                            print(message)
+                            if hasattr(self.extender, "progressBar"):
+                                SwingUtilities.invokeLater(
+                                    lambda: self.extender.progressBar.setString(message)
+                                )
+                                SwingUtilities.invokeLater(
+                                    lambda: self.extender.progressBar.setStringPainted(True)
+                                )
+                    except Exception:
+                        pass
                 SwingUtilities.invokeLater(lambda: self.refresh_table())
 
         t = Thread(target=run)
@@ -696,6 +713,9 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
                     "api_key": self.extender.llmApiKey.getText(),
                     "model": self.extender.llmModel.getText(),
                     "analyze_result": self.extender.llmAnalyzeResult.isSelected(),
+                    "verify_ssl": not self.extender.llmDisableSslVerification.isSelected()
+                    if hasattr(self.extender, "llmDisableSslVerification")
+                    else True,
                 }
 
                 # Show progress
@@ -821,7 +841,11 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
                 "analyze_result": self.extender.llmAnalyzeResult.isSelected()
                 if hasattr(self.extender, "llmAnalyzeResult")
                 else False,
+                "verify_ssl": not self.extender.llmDisableSslVerification.isSelected()
+                if hasattr(self.extender, "llmDisableSslVerification")
+                else True,
             }
+
 
             if hasattr(self.extender, "progressBar"):
                 SwingUtilities.invokeLater(

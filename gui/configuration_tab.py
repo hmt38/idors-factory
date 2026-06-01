@@ -50,11 +50,11 @@ class RunExtractorRunnable(Runnable):
             # Show progress
             if hasattr(self._extender, "progressBar"):
                 SwingUtilities.invokeLater(
-                    lambda: self._extender.progressBar.setIndeterminate(True)
+                    lambda: self._extender.progressBar.setIndeterminate(False)
                 )
                 SwingUtilities.invokeLater(
                     lambda: self._extender.progressBar.setString(
-                        "Extracting Parameters..."
+                        "Extracting Parameters: 0/?"
                     )
                 )
                 SwingUtilities.invokeLater(
@@ -99,6 +99,26 @@ class RunAttackerRunnable(Runnable):
     def __init__(self, extender):
         self._extender = extender
 
+    def _is_single_parameter_pool_user(self):
+        try:
+            if not hasattr(self._extender, "db_manager") or not self._extender.db_manager:
+                return False
+            rows = self._extender.db_manager.fetch_all(
+                "SELECT COUNT(DISTINCT user_identifier) FROM parameter_pool WHERE user_identifier IS NOT NULL AND user_identifier != ''"
+            )
+            return bool(rows and int(rows[0][0] or 0) == 1)
+        except Exception:
+            return False
+
+    def _show_single_user_pool_warning(self):
+        message = "参数池只识别到一个用户，请检查是否填错了cookie导致没有识别到用户，或者是没有抓到另一个用户的流量？"
+        print(message)
+        if hasattr(self._extender, "progressBar"):
+            SwingUtilities.invokeLater(lambda: self._extender.progressBar.setString(message))
+            SwingUtilities.invokeLater(
+                lambda: self._extender.progressBar.setStringPainted(True)
+            )
+
     def run(self):
         if hasattr(self._extender, "attack_engine") and self._extender.attack_engine:
             print("Manually running Attack Engine...")
@@ -117,18 +137,25 @@ class RunAttackerRunnable(Runnable):
                 )
 
             try:
-                self._extender.attack_engine.generate_attacks()
+                should_show_single_user_warning = False
+                created_count = self._extender.attack_engine.generate_attacks()
+                should_show_single_user_warning = (
+                    created_count == 0 and self._is_single_parameter_pool_user()
+                )
+                if should_show_single_user_warning:
+                    self._show_single_user_pool_warning()
                 print("Attack generation complete.")
             finally:
                 if hasattr(self._extender, "progressBar"):
                     SwingUtilities.invokeLater(
                         lambda: self._extender.progressBar.setIndeterminate(False)
                     )
-                    SwingUtilities.invokeLater(
-                        lambda: self._extender.progressBar.setString(
-                            "Generation Complete"
+                    if not should_show_single_user_warning:
+                        SwingUtilities.invokeLater(
+                            lambda: self._extender.progressBar.setString(
+                                "Generation Complete"
+                            )
                         )
-                    )
         else:
             print("Attack Engine not initialized.")
 
@@ -172,6 +199,7 @@ class TestLLMRunnable(Runnable):
                 self._extender.llmBaseUrl.getText(),
                 self._extender.llmApiKey.getText(),
                 self._extender.llmModel.getText(),
+                verify_ssl=not self._extender.llmDisableSslVerification.isSelected(),
             )
 
             # Simple test prompt
@@ -296,6 +324,12 @@ class ConfigurationTab:
 
         self._extender.testLlmButton = JButton("Test LLM", actionPerformed=self.testLlm)
         self._extender.testLlmButton.setToolTipText("Test connection to LLM API")
+
+        self._extender.llmDisableSslVerification = JCheckBox("Disable LLM SSL verification")
+        self._extender.llmDisableSslVerification.setSelected(False)
+        self._extender.llmDisableSslVerification.setToolTipText(
+            "Disable HTTPS certificate and hostname verification for LLM requests. Use only for self-signed/internal test endpoints."
+        )
 
         self._extender.enableLlm = JCheckBox("Enable LLM Analysis")
         self._extender.enableLlm.setSelected(False)
@@ -470,6 +504,12 @@ class ConfigurationTab:
                     )
                     .addComponent(
                         self._extender.enableLlm,
+                        GroupLayout.PREFERRED_SIZE,
+                        GroupLayout.PREFERRED_SIZE,
+                        GroupLayout.PREFERRED_SIZE,
+                    )
+                    .addComponent(
+                        self._extender.llmDisableSslVerification,
                         GroupLayout.PREFERRED_SIZE,
                         GroupLayout.PREFERRED_SIZE,
                         GroupLayout.PREFERRED_SIZE,
@@ -675,6 +715,12 @@ class ConfigurationTab:
                 layout.createParallelGroup(GroupLayout.Alignment.BASELINE)
                 .addComponent(self._extender.llmIdentifyRisk)
                 .addComponent(self._extender.llmAnalyzeResult)
+            )
+            .addComponent(
+                self._extender.llmDisableSslVerification,
+                GroupLayout.PREFERRED_SIZE,
+                GroupLayout.PREFERRED_SIZE,
+                GroupLayout.PREFERRED_SIZE,
             )
             .addComponent(
                 self._extender.progressBar,

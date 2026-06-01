@@ -90,6 +90,9 @@ class BurpExtender(IBurpExtender, IHttpListener, IProxyListener, IExtensionState
             "api_key": self.llmApiKey.getText() if hasattr(self, "llmApiKey") else "",
             "model": self.llmModel.getText() if hasattr(self, "llmModel") else "",
             "analyze_result": analyze_result,
+            "verify_ssl": not self.llmDisableSslVerification.isSelected()
+            if hasattr(self, "llmDisableSslVerification")
+            else True,
         }
 
     def _update_auto_status(self, message):

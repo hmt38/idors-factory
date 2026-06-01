@@ -34,7 +34,8 @@ class SaveRestore():
             "replaceQueryParam",
             "showBypassed",
             "showIsEnforced", 
-            "showEnforced"
+            "showEnforced",
+            "llmDisableSslVerification"
         ]
 
     def saveState(self):

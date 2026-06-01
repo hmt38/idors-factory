@@ -6,10 +6,16 @@ import urllib2
 import traceback
 
 class LLMHelper:
-    def __init__(self, base_url, api_key, model):
-        self.base_url = base_url
+    _trust_all_ssl_installed = False
+    _ssl_warning_logged = False
+    _default_ssl_socket_factory = None
+    _default_hostname_verifier = None
+
+    def __init__(self, base_url, api_key, model, verify_ssl=True):
+        self.base_url = base_url.rstrip('/') if base_url else base_url
         self.api_key = api_key
         self.model = model
+        self.verify_ssl = verify_ssl
 
     def extract_params(self, request_data):
         """
@@ -296,7 +302,7 @@ JSON Response:
         # Allow passing custom system prompt or just a string
         url = self.base_url + "/chat/completions"
         headers = {
-            "Content-Type": "application/json",
+            "Content-Type": "application/json; charset=utf-8",
             "Authorization": "Bearer " + self.api_key
         }
         
@@ -309,11 +315,71 @@ JSON Response:
             "temperature": 0.0
         }
         
-        # print("[LLM] Calling URL: " + url)
-        req = urllib2.Request(url, json.dumps(payload), headers)
+        # Jython/urllib2 may fail with "cannot make memory view" when a unicode
+        # request body is passed. Always send UTF-8 bytes explicitly.
+        body = json.dumps(payload).encode("utf-8")
+        if not self.verify_ssl:
+            self._install_trust_all_ssl_context()
+        else:
+            self._restore_default_ssl_context()
+        req = urllib2.Request(url, body, headers)
         response = urllib2.urlopen(req, timeout=30) # 30s timeout
         response_data = response.read()
         return json.loads(response_data)
+
+    def _install_trust_all_ssl_context(self):
+        if not LLMHelper._ssl_warning_logged:
+            print("[LLM] WARNING: SSL certificate verification is disabled for LLM requests.")
+            LLMHelper._ssl_warning_logged = True
+        if LLMHelper._trust_all_ssl_installed:
+            return
+        try:
+            from javax.net.ssl import SSLContext, HttpsURLConnection, X509TrustManager, HostnameVerifier
+            from java.security import SecureRandom
+
+            class TrustAllManager(X509TrustManager):
+                def checkClientTrusted(self, chain, authType):
+                    pass
+
+                def checkServerTrusted(self, chain, authType):
+                    pass
+
+                def getAcceptedIssuers(self):
+                    return None
+
+            class TrustAllHostnameVerifier(HostnameVerifier):
+                def verify(self, hostname, session):
+                    return True
+
+            ssl_context = SSLContext.getInstance("TLS")
+            ssl_context.init(None, [TrustAllManager()], SecureRandom())
+            if LLMHelper._default_ssl_socket_factory is None:
+                LLMHelper._default_ssl_socket_factory = HttpsURLConnection.getDefaultSSLSocketFactory()
+            if LLMHelper._default_hostname_verifier is None:
+                LLMHelper._default_hostname_verifier = HttpsURLConnection.getDefaultHostnameVerifier()
+            HttpsURLConnection.setDefaultSSLSocketFactory(ssl_context.getSocketFactory())
+            HttpsURLConnection.setDefaultHostnameVerifier(TrustAllHostnameVerifier())
+            LLMHelper._trust_all_ssl_installed = True
+        except Exception as e:
+            print("[LLM] Failed to disable SSL verification: " + str(e))
+
+    def _restore_default_ssl_context(self):
+        if not LLMHelper._trust_all_ssl_installed:
+            return
+        try:
+            from javax.net.ssl import HttpsURLConnection
+
+            if LLMHelper._default_ssl_socket_factory is not None:
+                HttpsURLConnection.setDefaultSSLSocketFactory(
+                    LLMHelper._default_ssl_socket_factory
+                )
+            if LLMHelper._default_hostname_verifier is not None:
+                HttpsURLConnection.setDefaultHostnameVerifier(
+                    LLMHelper._default_hostname_verifier
+                )
+            LLMHelper._trust_all_ssl_installed = False
+        except Exception as e:
+            print("[LLM] Failed to restore SSL verification defaults: " + str(e))
 
     def _parse_response(self, response_json):
         try:
