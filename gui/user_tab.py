@@ -16,6 +16,7 @@ from java.awt import FlowLayout
 from java.awt import Color
 from java.awt import Font
 from java.awt.event import ActionListener
+import re
 
 from gui.enforcement_detector import EnforcementDetectors
 from gui.match_replace import MatchReplace
@@ -174,7 +175,7 @@ class UserHeaders():
 
             if conflicting:
                 self.conflictWarningLabel.setText(
-                    'Warning: Users headers may override MR header rules for: ' + ', '.join(conflicting[:5])
+                    'Info: Match/Replace header rules override Users headers for: ' + ', '.join(conflicting[:5])
                 )
             else:
                 self.conflictWarningLabel.setText("")
@@ -200,6 +201,7 @@ class UserTab():
     def draw(self):
         self._extender.userPanel = JPanel(BorderLayout())
         
+        topPanel = JPanel(BorderLayout())
         buttonPanel = JPanel(FlowLayout(FlowLayout.LEFT))
         
         self.addUserBtn = JButton("Add User")
@@ -217,13 +219,46 @@ class UserTab():
         self.renameUserBtn = JButton("Rename User")
         self.renameUserBtn.addActionListener(RenameUserAction(self))
         buttonPanel.add(self.renameUserBtn)
+
+        self.headerFuzzKeysPanel = JPanel(BorderLayout())
+        self.headerFuzzKeysLabel = JLabel("Global Header Fuzz Keys (one per line or comma-separated):")
+        self.headerFuzzKeysText = JTextArea("", 3, 40)
+        self.headerFuzzKeysText.setToolTipText(
+            "Header keys listed here will be extracted into parameter_pool and used for IDOR fuzzing/recommendations."
+        )
+        self.headerFuzzKeysText.setWrapStyleWord(True)
+        self.headerFuzzKeysText.setLineWrap(True)
+        self.headerFuzzKeysScroll = JScrollPane(self.headerFuzzKeysText)
+        self.headerFuzzKeysScroll.setBorder(LineBorder(Color.BLACK))
+        self.headerFuzzKeysPanel.add(self.headerFuzzKeysLabel, BorderLayout.NORTH)
+        self.headerFuzzKeysPanel.add(self.headerFuzzKeysScroll, BorderLayout.CENTER)
+        topPanel.add(buttonPanel, BorderLayout.NORTH)
+        topPanel.add(self.headerFuzzKeysPanel, BorderLayout.CENTER)
         
         self.userTabs = JTabbedPane()
         
         self.add_user()
         
-        self._extender.userPanel.add(buttonPanel, BorderLayout.NORTH)
+        self._extender.userPanel.add(topPanel, BorderLayout.NORTH)
         self._extender.userPanel.add(self.userTabs, BorderLayout.CENTER)
+
+    def get_global_header_fuzz_keys(self):
+        try:
+            text = self.headerFuzzKeysText.getText()
+        except Exception:
+            return []
+
+        keys = []
+        seen = set()
+        for item in re.split(r"[,\n\r]+", text or ""):
+            key = item.strip()
+            if not key:
+                continue
+            normalized = key.lower()
+            if normalized not in seen:
+                keys.append(key)
+                seen.add(normalized)
+        return keys
     
     def add_user(self):
         self.user_count += 1

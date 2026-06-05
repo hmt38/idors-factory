@@ -624,6 +624,10 @@ def apply_user_rules_to_request_components(self, request_line, header_lines, bod
     user_header_pairs = parse_header_lines(user_headers_text)
     queryFlag = self.replaceQueryParam.isSelected()
 
+    if apply_user_header_text and user_header_pairs:
+        for name, value in user_header_pairs:
+            headers = [headers[0]] + upsert_header(headers[1:], name, value)
+
     if apply_user_header_text and queryFlag:
         if user_headers_text:
             param = user_headers_text.split("=")
@@ -662,10 +666,6 @@ def apply_user_rules_to_request_components(self, request_line, header_lines, bod
                     headers[0] = _set_query_param_in_request_line(
                         headers[0], query_name, replace_pattern
                     )
-
-    if apply_user_header_text and user_header_pairs and not queryFlag:
-        for name, value in user_header_pairs:
-            headers = [headers[0]] + upsert_header(headers[1:], name, value)
 
     if body_text is None:
         body_text = ""

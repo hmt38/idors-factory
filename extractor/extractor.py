@@ -60,7 +60,7 @@ class ParameterExtractor:
         """
         # Step 1: Fetch data first using fetch_all (which opens and closes connection immediately)
         rows = self.db_manager.fetch_all(
-            "SELECT id, method, host, url, path, query_params, body, user_identifier FROM raw_requests WHERE is_analyzed = 0 LIMIT 50"
+            "SELECT id, method, host, url, path, query_params, body, headers, user_identifier FROM raw_requests WHERE is_analyzed = 0 LIMIT 50"
         )
 
         print("[Extractor] Fetched {} unanalyzed requests.".format(len(rows or [])))
@@ -112,6 +112,7 @@ class ParameterExtractor:
                     path,
                     query_params_json,
                     body,
+                    headers_json,
                     user_identifier,
                 ) = row
 
@@ -169,6 +170,11 @@ class ParameterExtractor:
 
                 # 3. Extract Path Params (Heuristic: Numeric IDs or UUIDs)
                 request_saved += self._extract_path_params(api_signature, path, user_identifier, req_id)
+
+                # 4. Extract selected Header Params
+                request_saved += self._extract_header_params(
+                    api_signature, headers_json, user_identifier, req_id
+                )
 
                 # LLM Extraction
                 if llm_helper:
@@ -350,6 +356,78 @@ class ParameterExtractor:
                 saved_count += 1
         return saved_count
 
+    def _get_header_fuzz_key_map(self, user_identifier):
+        key_map = {}
+        extender = getattr(self.db_manager, "extender", None)
+        user_tab = getattr(extender, "userTab", None) if extender else None
+        if not user_tab:
+            return key_map
+
+        try:
+            for key in user_tab.get_global_header_fuzz_keys():
+                key_map[key.strip().lower()] = key.strip()
+        except Exception:
+            pass
+
+        try:
+            for user_id, user_data in user_tab.user_tabs.items():
+                if str(user_data.get("user_name", "")).strip().lower() != str(user_identifier).strip().lower():
+                    continue
+                mr_instance = user_data.get("mr_instance")
+                if not mr_instance:
+                    break
+                for i in range(mr_instance.MRModel.getSize()):
+                    rule_key = mr_instance.MRModel.getElementAt(i)
+                    rule_data = mr_instance.badProgrammerMRModel.get(rule_key)
+                    if not rule_data:
+                        rule_data = mr_instance.badProgrammerMRModel.get(str(rule_key))
+                    if not rule_data:
+                        continue
+                    if rule_data.get("type") == "Header Add/Set:":
+                        key = (rule_data.get("match") or "").strip()
+                        if key:
+                            key_map[key.lower()] = key
+                break
+        except Exception as e:
+            print("[Extractor] Error reading header fuzz keys: " + str(e))
+
+        return key_map
+
+    def _extract_header_params(self, api_signature, headers_json, user_identifier, req_id):
+        saved_count = 0
+        key_map = self._get_header_fuzz_key_map(user_identifier)
+        if not key_map or not headers_json:
+            return saved_count
+
+        try:
+            headers = json.loads(headers_json)
+        except Exception as e:
+            print("[Extractor] Error parsing headers for request {}: {}".format(req_id, str(e)))
+            return saved_count
+
+        for line in headers:
+            if not line or ":" not in line:
+                continue
+            name, value = line.split(":", 1)
+            header_name = name.strip()
+            header_value = value.strip()
+            if not header_name:
+                continue
+            normalized = header_name.lower()
+            if normalized not in key_map:
+                continue
+            if self._save_param(
+                api_signature,
+                header_name,
+                header_value,
+                "HEADER",
+                user_identifier,
+                req_id,
+            ):
+                saved_count += 1
+
+        return saved_count
+
     def _save_param(
         self, api_signature, name, value, location, user_identifier, req_id
     ):
@@ -463,6 +541,8 @@ class ParameterExtractor:
 
         # 3. Location Analysis (Extra Weight)
         if location == "PATH":
+            score += 10
+        elif location == "HEADER":
             score += 10
         elif location == "BODY_JSON":
             score += 5

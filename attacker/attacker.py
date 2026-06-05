@@ -284,7 +284,7 @@ class AttackEngine:
 
         # 2. Extract parameters from current request
         current_params = self._extract_params_from_request(
-            path, query_params_json, body
+            path, query_params_json, body, headers_json, user_identifier
         )
 
         if not current_params:
@@ -300,10 +300,11 @@ class AttackEngine:
 
             # Query risk score from pool (assuming we have it stored)
             # If not found, default to 0.
-            sql = "SELECT risk_score FROM parameter_pool WHERE api_signature = '{}' AND param_name = '{}' AND user_identifier = '{}'".format(
+            sql = "SELECT risk_score FROM parameter_pool WHERE api_signature = '{}' AND param_name = '{}' AND user_identifier = '{}' AND location = '{}'".format(
                 api_signature.replace("'", "''"),
                 name.replace("'", "''"),
                 user_identifier.replace("'", "''"),
+                location.replace("'", "''"),
             )
             rows = self.db_manager.fetch_all(sql)
             score = 0
@@ -357,7 +358,7 @@ class AttackEngine:
             )
 
             # Fetch all params for this other user on this API
-            sql_other_params = "SELECT param_name, param_value FROM parameter_pool WHERE api_signature = '{}' AND user_identifier = '{}'".format(
+            sql_other_params = "SELECT param_name, param_value, location FROM parameter_pool WHERE api_signature = '{}' AND user_identifier = '{}'".format(
                 api_signature.replace("'", "''"), other_user.replace("'", "''")
             )
             other_param_rows = []
@@ -369,7 +370,7 @@ class AttackEngine:
 
             # Convert to dictionary for easy lookup
             other_params_map = {
-                row[0]: row[1]
+                self._param_lookup_key(row[0], row[2]): row[1]
                 for row in other_param_rows
                 if not self._is_blacklisted(row[0])
             }
@@ -379,8 +380,9 @@ class AttackEngine:
             for tp in target_params:
                 p_name = tp["name"]
                 p_val = tp["value"]
-                if p_name in other_params_map:
-                    other_val = other_params_map[p_name]
+                lookup_key = self._param_lookup_key(p_name, tp["location"])
+                if lookup_key in other_params_map:
+                    other_val = other_params_map[lookup_key]
                     # Log comparison
                     # print("[Attacker] Comparing param {}: My val={}, Other val={}".format(p_name, p_val, other_val))
                     if str(other_val) != str(p_val):
@@ -488,6 +490,11 @@ class AttackEngine:
             except:
                 pass
 
+        try:
+            new_headers = json.loads(headers_json)
+        except Exception:
+            new_headers = []
+
         # Apply swaps
         for p in combination:
             name = p["name"]
@@ -527,6 +534,9 @@ class AttackEngine:
             elif loc == "BODY_JSON":
                 self._update_json_value(b_dict, name, val)
 
+            elif loc == "HEADER":
+                new_headers = self._upsert_header(new_headers, name, val)
+
         # Serialize back
         if q_dict:
             new_query_str = json.dumps(q_dict)
@@ -541,7 +551,7 @@ class AttackEngine:
                 "method": method,
                 "host": host,
                 "path": new_path,
-                "headers": json.loads(headers_json),
+                "headers": new_headers,
                 "query_params": json.loads(new_query_str) if new_query_str else {},
                 "body": new_body_str,
             }
@@ -550,11 +560,11 @@ class AttackEngine:
             )
             new_path = request_data_preview["path"]
             new_body_str = request_data_preview["body"]
-            hidden_headers = request_data_preview.get("headers", json.loads(headers_json))
+            hidden_headers = request_data_preview.get("headers", new_headers)
             hidden_query_params = request_data_preview.get("query_params", {})
             hidden_param_applied = True
         else:
-            hidden_headers = json.loads(headers_json)
+            hidden_headers = new_headers
             hidden_query_params = json.loads(new_query_str) if new_query_str else {}
 
         # Create Request Data
@@ -845,7 +855,69 @@ class AttackEngine:
             hidden_param_entry.get("key", ""), hidden_param_entry.get("value", "")
         )
 
-    def _extract_params_from_request(self, path, query_params_json, body):
+    def _param_lookup_key(self, name, location):
+        if str(location).upper() == "HEADER":
+            return "HEADER:" + str(name).strip().lower()
+        return str(location) + ":" + str(name)
+
+    def _get_header_fuzz_key_map(self, user_identifier):
+        key_map = {}
+        extender = getattr(self.db_manager, "extender", None)
+        user_tab = getattr(extender, "userTab", None) if extender else None
+        if not user_tab:
+            return key_map
+
+        try:
+            for key in user_tab.get_global_header_fuzz_keys():
+                key = key.strip()
+                if key:
+                    key_map[key.lower()] = key
+        except Exception:
+            pass
+
+        try:
+            for user_id, user_data in user_tab.user_tabs.items():
+                if str(user_data.get("user_name", "")).strip().lower() != str(user_identifier).strip().lower():
+                    continue
+                mr_instance = user_data.get("mr_instance")
+                if not mr_instance:
+                    break
+                for i in range(mr_instance.MRModel.getSize()):
+                    rule_key = mr_instance.MRModel.getElementAt(i)
+                    rule_data = mr_instance.badProgrammerMRModel.get(rule_key)
+                    if not rule_data:
+                        rule_data = mr_instance.badProgrammerMRModel.get(str(rule_key))
+                    if rule_data and rule_data.get("type") == "Header Add/Set:":
+                        key = (rule_data.get("match") or "").strip()
+                        if key:
+                            key_map[key.lower()] = key
+                break
+        except Exception as e:
+            print("[Attacker] Error reading header fuzz keys: " + str(e))
+
+        return key_map
+
+    def _extract_header_params_from_request(self, headers_json, user_identifier, params):
+        key_map = self._get_header_fuzz_key_map(user_identifier)
+        if not key_map or not headers_json:
+            return
+
+        try:
+            headers = json.loads(headers_json)
+        except Exception:
+            return
+
+        for line in headers:
+            if not line or ":" not in line:
+                continue
+            name, value = line.split(":", 1)
+            header_name = name.strip()
+            if not header_name:
+                continue
+            if header_name.lower() in key_map:
+                params.append((header_name, value.strip(), "HEADER"))
+
+    def _extract_params_from_request(self, path, query_params_json, body, headers_json=None, user_identifier=None):
         params = []  # (name, value, location)
 
         # Path - use the same semantic naming strategy as extractor
@@ -881,6 +953,8 @@ class AttackEngine:
                 self._flatten_json(b, params)
             except:
                 pass
+
+        self._extract_header_params_from_request(headers_json, user_identifier, params)
 
         return params
 

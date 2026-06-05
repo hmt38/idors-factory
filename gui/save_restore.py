@@ -52,6 +52,13 @@ class SaveRestore():
                 # Configuration
                 user_configs = []
 
+                if hasattr(self._extender, 'userTab') and hasattr(self._extender.userTab, 'headerFuzzKeysText'):
+                    tempRow = [
+                        "GlobalHeaderFuzzKeys",
+                        base64.b64encode(self._extender.userTab.headerFuzzKeysText.getText())
+                    ]
+                    csvwriter.writerow(tempRow)
+
                 for user_id, user_data in self._extender.userTab.user_tabs.items():
                     user_config = {
                         'user_id': user_id,
@@ -210,6 +217,14 @@ class SaveRestore():
                                             restored_value['regexMatch'] = None
                                     user_data['mr_instance'].badProgrammerMRModel[key] = restored_value
                                     user_data['mr_instance'].MRModel.addElement(key)
+                        continue
+
+                    if row[0] == "GlobalHeaderFuzzKeys":
+                        try:
+                            if hasattr(self._extender, 'userTab') and hasattr(self._extender.userTab, 'headerFuzzKeysText'):
+                                self._extender.userTab.headerFuzzKeysText.setText(base64.b64decode(row[1]))
+                        except Exception:
+                            pass
                         continue
 
                     if row[0] == "EDFilterUnauth":
