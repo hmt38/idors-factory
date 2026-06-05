@@ -2,8 +2,14 @@
 # -*- coding: utf-8 -*-
 
 import json
+import re
 import urllib2
 import traceback
+
+try:
+    basestring
+except NameError:
+    basestring = str
 
 class LLMHelper:
     _trust_all_ssl_installed = False
@@ -238,10 +244,14 @@ Example Output:
     def analyze_idor_vulnerability(self, original_req, original_res, attack_req, attack_res):
         """
         Analyze if the attack was successful using LLM.
-        Returns a dict with 'result' (VULNERABLE, SAFE, UNCERTAIN) and 'reason'.
+        Returns a dict with 'result' (VULNERABLE, SAFE, UNCERTAIN), 'reason', and 'confidence'.
         """
         if not self.api_key or not self.base_url:
-            return {"result": "UNCERTAIN", "reason": "LLM not configured"}
+            return {"result": "UNCERTAIN", "reason": "LLM not configured", "confidence": 0.2}
+
+        heuristic_result = self._analyze_idor_with_heuristics(original_res, attack_res)
+        if heuristic_result:
+            return heuristic_result
 
         prompt = self._construct_prompt(original_req, original_res, attack_req, attack_res)
         
@@ -251,52 +261,304 @@ Example Output:
         except Exception as e:
             print("[LLM] Error analyzing vulnerability: " + str(e))
             traceback.print_exc()
-            return {"result": "UNCERTAIN", "reason": "LLM call failed: " + str(e)}
+            return {"result": "UNCERTAIN", "reason": "LLM call failed: " + str(e), "confidence": 0.2}
+
+    def _analyze_idor_with_heuristics(self, original_res, attack_res):
+        attack_status = self._extract_http_status_code(attack_res)
+        attack_body = self._extract_response_body(attack_res)
+        attack_body_lower = attack_body.lower()
+
+        if attack_status in [401, 403]:
+            return {
+                "result": "SAFE",
+                "reason": "Attack response returned HTTP {} authorization error.".format(
+                    attack_status
+                ),
+                "confidence": 0.99,
+            }
+
+        auth_markers = [
+            "unauthorized",
+            "forbidden",
+            "access denied",
+            "permission denied",
+            "not authorized",
+            "no permission",
+            "insufficient permission",
+            "do not have authority",
+            "no authority",
+            "auth failed",
+            "authentication failed",
+            "login required",
+            "please login",
+        ]
+        for marker in auth_markers:
+            if marker in attack_body_lower:
+                return {
+                    "result": "SAFE",
+                    "reason": "Attack response body indicates authorization failure: '{}'".format(
+                        marker
+                    ),
+                    "confidence": 0.97,
+                }
+
+        parsed_body = self._try_parse_json(attack_body)
+        if isinstance(parsed_body, dict):
+            app_code = str(parsed_body.get("code", "") or "").upper()
+            app_sc = str(parsed_body.get("sc", "") or "")
+            app_message = str(parsed_body.get("message", "") or "").lower()
+            if app_code in ["UNAUTHORIZED", "FORBIDDEN", "ACCESS_DENIED", "PERMISSION_DENIED"]:
+                return {
+                    "result": "SAFE",
+                    "reason": "Attack response JSON code indicates authorization failure: {}".format(
+                        app_code
+                    ),
+                    "confidence": 0.99,
+                }
+            if app_sc in ["401", "403"]:
+                return {
+                    "result": "SAFE",
+                    "reason": "Attack response JSON sc indicates authorization failure: {}".format(
+                        app_sc
+                    ),
+                    "confidence": 0.99,
+                }
+            if any(marker in app_message for marker in auth_markers):
+                return {
+                    "result": "SAFE",
+                    "reason": "Attack response JSON message indicates authorization failure.",
+                    "confidence": 0.96,
+                }
+
+        original_body = self._extract_response_body(original_res)
+        if attack_status == 200 and self._responses_look_like_success_data(original_body, attack_body):
+            return {
+                "result": "VULNERABLE",
+                "reason": "Attack response appears to return valid business data rather than an authorization failure.",
+                "confidence": 0.9,
+            }
+
+        if attack_status in [404, 500]:
+            return {
+                "result": "SAFE",
+                "reason": "Attack response returned HTTP {}, which does not indicate successful unauthorized data access.".format(
+                    attack_status
+                ),
+                "confidence": 0.9,
+            }
+
+        return None
 
     def _construct_prompt(self, original_req, original_res, attack_req, attack_res):
-        # Truncate large bodies to avoid token limits
-        def truncate(s, limit=2000):
-            if s and len(s) > limit:
-                return s[:limit] + "...(truncated)"
-            return s
+        original_req_prepared = self._prepare_http_message_for_prompt(original_req, 2500)
+        original_res_prepared = self._prepare_http_message_for_prompt(original_res, 5000)
+        attack_req_prepared = self._prepare_http_message_for_prompt(attack_req, 2500)
+        attack_res_prepared = self._prepare_http_message_for_prompt(attack_res, 5000)
 
         prompt = """You are a Web Security Expert specializing in IDOR (Insecure Direct Object Reference) detection.
-Your task is to analyze the following HTTP interaction to determine if an IDOR attack was successful.
+Your task is to determine whether the ATTACK REQUEST successfully accessed another user's data.
 
 SCENARIO:
-User A (Attacker) is trying to access a resource belonging to User B (Victim) by modifying parameters (e.g., ID) in the request.
+- ORIGINAL REQUEST/RESPONSE: baseline request where the user accesses their own resource.
+- ATTACK REQUEST/RESPONSE: modified request attempting to access another user's resource.
 
-CONTEXT 1: ORIGINAL REQUEST (User A accessing their own resource)
-Request:
-{}
-Response:
-{}
-
-CONTEXT 2: ATTACK REQUEST (User A trying to access User B's resource)
-Request:
-{}
-Response:
-{}
-
-INSTRUCTIONS:
-1. Compare the Attack Response with the Original Response.
-2. If the Attack Response indicates successful access to User B's data (e.g., HTTP 200 OK with valid data, distinct from an error page), it is VULNERABLE.
-3. If the Attack Response is a permission error (401, 403), a generic error (500), or 'Not Found' (404) that implies access control blocked it, it is SAFE.
-4. Be careful with 'soft 200' errors (where status is 200 but body says "Access Denied").
+DECISION RULES:
+1. Return SAFE if the attack response is an authorization failure, permission denial, forbidden response, login redirect, not-logged-in response, or any application-level denial even when HTTP status is 200.
+2. Treat common denial indicators such as code/message values like UNAUTHORIZED, FORBIDDEN, ACCESS_DENIED, PERMISSION_DENIED, "current user do not have authority", "access denied", "no permission", or JSON fields like sc=401/sc=403 as SAFE.
+3. Return VULNERABLE only when the attack response appears to return real business data, resource details, object content, list items, profile information, order data, tokens, or other useful protected information rather than an error/denial message.
+4. If the attack response contains structured data that looks like a real object/list/result payload and does not contain denial indicators, prefer VULNERABLE over UNCERTAIN.
+5. Use UNCERTAIN only when the evidence is genuinely insufficient, contradictory, heavily truncated, unreadable, or impossible to classify confidently.
+6. Large bodies may be truncated or summarized. Focus on the most security-relevant evidence: status line, denial/error markers, and whether the body contains real business data.
 
 OUTPUT FORMAT:
-Return ONLY a JSON object with the following fields:
-- "result": One of ["VULNERABLE", "SAFE", "UNCERTAIN"]
-- "reason": A brief explanation of your decision.
+Return ONLY a JSON object:
+{
+  "result": "VULNERABLE" | "SAFE" | "UNCERTAIN",
+  "confidence": number between 0 and 1,
+  "reason": "short explanation"
+}
 
-JSON Response:
+ORIGINAL REQUEST:
+{}
+
+ORIGINAL RESPONSE:
+{}
+
+ATTACK REQUEST:
+{}
+
+ATTACK RESPONSE:
+{}
 """.format(
-            truncate(original_req), 
-            truncate(original_res), 
-            truncate(attack_req), 
-            truncate(attack_res)
+            original_req_prepared,
+            original_res_prepared,
+            attack_req_prepared,
+            attack_res_prepared,
         )
         return prompt
+
+    def _extract_http_status_code(self, response_text):
+        if not response_text:
+            return None
+        first_line = response_text.splitlines()[0] if response_text.splitlines() else ""
+        match = re.search(r"HTTP/\d(?:\.\d)?\s+(\d{3})", first_line)
+        if match:
+            try:
+                return int(match.group(1))
+            except Exception:
+                return None
+        return None
+
+    def _extract_response_body(self, response_text):
+        if not response_text:
+            return ""
+        if "\r\n\r\n" in response_text:
+            return response_text.split("\r\n\r\n", 1)[1]
+        if "\n\n" in response_text:
+            return response_text.split("\n\n", 1)[1]
+        return response_text
+
+    def _try_parse_json(self, text):
+        if not text:
+            return None
+        text = text.strip()
+        if not text or not (text.startswith("{") or text.startswith("[")):
+            return None
+        try:
+            return json.loads(text)
+        except Exception:
+            return None
+
+    def _looks_like_business_data(self, parsed_json):
+        if isinstance(parsed_json, list):
+            return len(parsed_json) > 0
+        if not isinstance(parsed_json, dict):
+            return False
+
+        denial_markers = [
+            "unauthorized",
+            "forbidden",
+            "access denied",
+            "permission denied",
+            "not authorized",
+            "no permission",
+            "do not have authority",
+            "no authority",
+            "login required",
+        ]
+
+        denial_keys = {
+            "error",
+            "errors",
+            "message",
+            "msg",
+            "code",
+            "status",
+            "sc",
+            "exception",
+        }
+        value_keys = [
+            "data",
+            "result",
+            "results",
+            "items",
+            "list",
+            "rows",
+            "records",
+            "user",
+            "users",
+            "profile",
+            "order",
+            "orders",
+            "content",
+            "detail",
+            "details",
+        ]
+
+        for key in value_keys:
+            if key in parsed_json:
+                value = parsed_json.get(key)
+                if isinstance(value, dict) and value:
+                    message_value = str(parsed_json.get("message", "") or "").lower()
+                    code_value = str(parsed_json.get("code", "") or "").lower()
+                    if any(marker in message_value for marker in denial_markers):
+                        continue
+                    if any(marker in code_value for marker in denial_markers):
+                        continue
+                    return True
+                if isinstance(value, list) and value:
+                    return True
+                if isinstance(value, basestring) and value.strip():
+                    return True
+                if isinstance(value, (int, float)):
+                    return True
+
+        non_denial_keys = [k for k in parsed_json.keys() if str(k).lower() not in denial_keys]
+        message_value = str(parsed_json.get("message", "") or "").lower()
+        code_value = str(parsed_json.get("code", "") or "").lower()
+        if any(marker in message_value for marker in denial_markers):
+            return False
+        if any(marker in code_value for marker in denial_markers):
+            return False
+        if len(non_denial_keys) >= 2:
+            return True
+        return False
+
+    def _responses_look_like_success_data(self, original_body, attack_body):
+        parsed_attack = self._try_parse_json(attack_body)
+        if self._looks_like_business_data(parsed_attack):
+            return True
+
+        parsed_original = self._try_parse_json(original_body)
+        if self._looks_like_business_data(parsed_original) and attack_body:
+            attack_trimmed = attack_body.strip()
+            if len(attack_trimmed) > 20 and not any(
+                marker in attack_trimmed.lower()
+                for marker in ["unauthorized", "forbidden", "denied", "no authority"]
+            ):
+                return True
+        return False
+
+    def _summarize_large_text(self, text, total_limit=5000, head=1500, tail=2500):
+        if not text:
+            return ""
+        if len(text) <= total_limit:
+            return text
+        omitted = len(text) - head - tail
+        if omitted < 0:
+            omitted = 0
+        return (
+            text[:head]
+            + "\n\n...[truncated {} chars]...\n\n".format(omitted)
+            + text[-tail:]
+        )
+
+    def _prepare_http_message_for_prompt(self, message_text, total_limit):
+        if not message_text:
+            return ""
+
+        header_part = message_text
+        body_part = ""
+        if "\r\n\r\n" in message_text:
+            header_part, body_part = message_text.split("\r\n\r\n", 1)
+            separator = "\r\n\r\n"
+        elif "\n\n" in message_text:
+            header_part, body_part = message_text.split("\n\n", 1)
+            separator = "\n\n"
+        else:
+            separator = "\n\n"
+
+        header_part = self._truncate(header_part, 1200)
+        parsed_json = self._try_parse_json(body_part)
+        if isinstance(parsed_json, (dict, list)):
+            try:
+                body_part = json.dumps(parsed_json, ensure_ascii=False, indent=2)
+            except TypeError:
+                body_part = json.dumps(parsed_json, indent=2)
+
+        body_part = self._summarize_large_text(body_part, max(1000, total_limit - len(header_part)))
+        combined = header_part + separator + body_part
+        return self._truncate(combined, total_limit)
 
     def _call_llm(self, prompt):
         # Allow passing custom system prompt or just a string
@@ -381,16 +643,22 @@ JSON Response:
         except Exception as e:
             print("[LLM] Failed to restore SSL verification defaults: " + str(e))
 
+    def _normalize_confidence(self, confidence, result_label):
+        try:
+            confidence = float(confidence)
+            if confidence < 0:
+                confidence = 0.0
+            if confidence > 1:
+                confidence = 1.0
+            return confidence
+        except Exception:
+            if result_label == "UNCERTAIN":
+                return 0.3
+            return 0.7
+
     def _parse_response(self, response_json):
         try:
-            content = response_json['choices'][0]['message']['content']
-            # Try to extract JSON from content (it might be wrapped in ```json ... ```)
-            if "```" in content:
-                content = content.split("```")[1]
-                if content.startswith("json"):
-                    content = content[4:]
-            
-            content = content.strip()
+            content = self._extract_content(response_json)
             result_obj = json.loads(content)
             
             # Normalize result
@@ -400,8 +668,9 @@ JSON Response:
                 
             return {
                 "result": res,
+                "confidence": self._normalize_confidence(result_obj.get("confidence", None), res),
                 "reason": result_obj.get("reason", "No reason provided")
             }
         except Exception as e:
             print("[LLM] Failed to parse LLM response: " + str(e))
-            return {"result": "UNCERTAIN", "reason": "Failed to parse LLM output"}
+            return {"result": "UNCERTAIN", "reason": "Failed to parse LLM output", "confidence": 0.2}

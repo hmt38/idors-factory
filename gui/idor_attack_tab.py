@@ -76,7 +76,14 @@ class IDORAttackTableModel(AbstractTableModel):
             try:
                 if attack[6]:
                     res = json.loads(attack[6])
-                    return res.get("result", "")
+                    result = res.get("result", "")
+                    confidence = res.get("confidence", None)
+                    if confidence is not None:
+                        try:
+                            return "{} ({:.0f}%)".format(result, float(confidence) * 100)
+                        except Exception:
+                            return str(result)
+                    return result
             except:
                 pass
             return ""
@@ -1284,6 +1291,17 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
                                 diff_sb.append(
                                     "Result: " + res.get("result", "UNKNOWN")
                                 )
+                                if res.get("confidence", None) is not None:
+                                    try:
+                                        diff_sb.append(
+                                            "Confidence: {:.0f}%".format(
+                                                float(res.get("confidence")) * 100
+                                            )
+                                        )
+                                    except:
+                                        diff_sb.append(
+                                            "Confidence: " + str(res.get("confidence"))
+                                        )
                                 diff_sb.append(
                                     "Reason: " + res.get("reason", "No reason provided")
                                 )
