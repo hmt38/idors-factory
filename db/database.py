@@ -31,10 +31,16 @@ class DatabaseManager:
             plugin_root = os.path.dirname(current_dir)
             self.db_path = os.path.join(plugin_root, db_path)
             print("Calculated database path: " + self.db_path)
+        except Exception:
+            # Fallback to current working directory if __file__ is not available
+            if not os.path.isabs(self.db_path):
+                self.db_path = os.path.join(os.getcwd(), self.db_path)
+            print("Fallback database path: " + self.db_path)
 
-            # Ensure lib jars are in sys.path (in case Autorize.py didn't pick them up or hot reload issues)
-            if USE_ZXJDBC:
-                lib_dir = os.path.join(plugin_root, "lib")
+        # Ensure lib jars are in sys.path (in case Autorize.py didn't pick them up or hot reload issues)
+        if USE_ZXJDBC:
+            try:
+                lib_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib")
                 if os.path.exists(lib_dir):
                     for jar in os.listdir(lib_dir):
                         if jar.endswith(".jar"):
@@ -86,12 +92,8 @@ class DatabaseManager:
                     print("Loaded org.sqlite.JDBC driver successfully")
                 except Exception as e:
                     print("Failed to load org.sqlite.JDBC driver: " + str(e))
-
-        except:
-            # Fallback to current working directory if __file__ is not available
-            if not os.path.isabs(self.db_path):
-                self.db_path = os.path.join(os.getcwd(), self.db_path)
-            print("Fallback database path: " + self.db_path)
+            except Exception as e:
+                print("[DB] WARN: jar loading failed: " + str(e))
 
         self.init_db()
 
@@ -465,19 +467,36 @@ class DatabaseManager:
         try:
             conn = self.get_connection()
             if conn:
-                cursor = conn.cursor()
-
-                # Enable WAL mode for better concurrency —— 不再静默吞错
+                # WAL 必须在事务外执行。zxJDBC 默认 autocommit=False 会隐式开事务，
+                # 导致 "cannot change into wal mode from within a transaction"。
+                # 先切 autocommit=True 跑完 PRAGMA，再切回 False 走建表事务。
+                wal_active = False
                 try:
-                    cursor.execute("PRAGMA journal_mode=WAL;")
-                    try:
-                        wal_result = cursor.fetchone()
-                    except Exception:
-                        wal_result = None
+                    conn.autocommit = True
+                    wal_cursor = conn.cursor()
+                    wal_cursor.execute("PRAGMA journal_mode=WAL;")
+                    wal_result = wal_cursor.fetchone()
                     print("[DB] PRAGMA journal_mode=WAL => " + str(wal_result))
+                    wal_active = bool(wal_result) and "wal" in str(wal_result).lower()
+                    try:
+                        wal_cursor.close()
+                    except Exception:
+                        pass
                 except Exception as e:
                     print("[DB] WARN: failed to set WAL: " + str(e))
-                # busy_timeout: 遇到锁时等待 5000ms 再报错，而非立即失败
+                finally:
+                    try:
+                        conn.autocommit = False  # 恢复手动事务，供建表使用
+                    except Exception:
+                        pass
+
+                if not wal_active:
+                    print("[DB] WARN: WAL not active; DB stays in default journal mode "
+                          "(read/write still mutually exclusive, only busy_timeout mitigates)")
+
+                cursor = conn.cursor()
+
+                # busy_timeout: 遇到锁时等待 5000ms 再报错（可在事务内执行）
                 try:
                     cursor.execute("PRAGMA busy_timeout=5000;")
                     print("[DB] PRAGMA busy_timeout=5000 set on init connection")
