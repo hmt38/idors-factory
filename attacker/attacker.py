@@ -185,6 +185,10 @@ class AttackEngine:
         HAVING total_users > 1
         """
         api_rows = self.db_manager.fetch_all(sql_api_users)
+        if api_rows is None:
+            # 查询失败：跳过本次 exclusivity 更新，不影响主流程
+            print("[Attacker] fetch api_users failed, skip exclusivity update")
+            return
 
         for api_row in api_rows:
             api_signature, total_users = api_row
@@ -197,6 +201,10 @@ class AttackEngine:
             GROUP BY param_name
             """.format(api_signature.replace("'", "''"))
             param_rows = self.db_manager.fetch_all(sql_param_users)
+            if param_rows is None:
+                # 该 API 的参数查询失败：跳过这个 API，继续下一个
+                print("[Attacker] fetch param_users failed for " + api_signature + ", skip")
+                continue
 
             for param_row in param_rows:
                 param_name, param_users = param_row
@@ -363,7 +371,13 @@ class AttackEngine:
             )
             other_param_rows = []
             try:
-                other_param_rows = self.db_manager.fetch_all(sql_other_params)
+                fetched = self.db_manager.fetch_all(sql_other_params)
+                if fetched is not None:
+                    other_param_rows = fetched
+                else:
+                    # 查询失败：当作 0 行处理，跳过这个用户
+                    print("[Attacker] fetch other_user params failed for " + str(other_user) + ", skip")
+                    continue
             except Exception as e_p:
                 print("[Attacker] Error fetching other user params: " + str(e_p))
                 continue

@@ -519,9 +519,13 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
         )
 
         try:
-            rows = self.extender.db_manager.fetch_all(sql)
-            for api_signature, is_sensitive in rows:
-                self.api_risk_cache[api_signature] = bool(is_sensitive)
+            metadata_rows = self.extender.db_manager.fetch_all(sql)
+            if metadata_rows is None:
+                # 查询失败：不更新 cache，保留默认值（False）
+                pass
+            else:
+                for api_signature, is_sensitive in metadata_rows:
+                    self.api_risk_cache[api_signature] = bool(is_sensitive)
         except Exception:
             pass
 
@@ -663,10 +667,27 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
         JOIN raw_requests r ON a.original_request_id = r.id
         ORDER BY a.verified DESC, a.id DESC
         """
-        if hasattr(self.extender, "db_manager"):
-            rows = self.extender.db_manager.fetch_all(sql)
-            self._preload_attack_metadata(rows)
-            self.table_model.set_attacks(rows)
+
+        # DB 读移到后台线程，避免阻塞 EDT
+        def fetch_and_update():
+            rows = None
+            if hasattr(self.extender, "db_manager"):
+                rows = self.extender.db_manager.fetch_all(sql)
+                # rows is None 表示查询失败：不要清空表格，保留上次数据
+                if rows is None:
+                    print("[GUI] refresh_table: fetch failed, keep existing data")
+                    return
+                self._preload_attack_metadata(rows)
+            else:
+                rows = []
+            # 更新表格必须回到 EDT（set_attacks -> fireTableDataChanged 必须在 EDT 上）
+            SwingUtilities.invokeLater(lambda r=rows: self.table_model.set_attacks(r))
+
+        if hasattr(self.extender, "executor"):
+            self.extender.executor.submit(fetch_and_update)
+        else:
+            # 兜底：没有线程池时退回直接执行
+            fetch_and_update()
 
     def generate_attacks(self, event):
         # Trigger generation in background

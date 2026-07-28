@@ -1,1 +1,15 @@
 *.class
+
+# Markdown files (keep README.md only)
+*.md
+!README.md
+
+# SQLite database files
+*.db
+*.db-wal
+*.db-shm
+
+# Log files
+*.log
+output.txt
+running-*.log

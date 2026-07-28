@@ -99,11 +99,17 @@ class DatabaseManager:
         try:
             conn = None
             if USE_ZXJDBC:
-                jdbc_url = "jdbc:sqlite:" + self.db_path
+                # busy_timeout 写进 JDBC URL（xerial sqlite-jdbc 支持 ?busy_timeout= 参数）
+                jdbc_url = "jdbc:sqlite:" + self.db_path + "?busy_timeout=5000"
                 driver = "org.sqlite.JDBC"
                 conn = zxJDBC.connect(jdbc_url, None, None, driver)
             else:
                 conn = sqlite3.connect(self.db_path, timeout=30)  # Increased timeout
+                # busy_timeout 是连接级，必须每次建连接都设
+                try:
+                    conn.execute("PRAGMA busy_timeout=5000;")
+                except Exception as e_bt:
+                    print("[DB] WARN: failed to set busy_timeout on python connection: " + str(e_bt))
 
             return conn
         except Exception as e:
@@ -182,210 +188,277 @@ class DatabaseManager:
         print("[DB] Failed to execute query after {} retries.".format(retries))
         return None
 
-    def fetch_all(self, query, params=None):
-        conn = None
-        cursor = None
-        try:
-            # Log query for debugging
-            print(
-                "[DB] Executing query: "
-                + query[:200]
-                + ("..." if len(query) > 200 else "")
-            )
-            if params:
-                print("[DB] Query params: " + str(params))
+    def fetch_all(self, query, params=None, retries=5):
+        """
+        Execute a SELECT query and return rows.
+        Returns:
+            list: 查询成功（可能为空列表 []）
+            None: 查询失败（连接失败、异常、SQLITE_BUSY 重试耗尽）
+        调用方应区分 None 与 []：None 不要清空表格；[] 才正常清空。
+        """
+        # Log query for debugging
+        print(
+            "[DB] Executing query: "
+            + query[:200]
+            + ("..." if len(query) > 200 else "")
+        )
+        if params:
+            print("[DB] Query params: " + str(params))
 
-            # Fix for zxJDBC BLOB handling: Replace BLOB columns with CAST to TEXT
-            # This prevents "not implemented" errors when fetching BLOB data
-            if USE_ZXJDBC:
-                # List of known BLOB columns that need CAST conversion (only actual BLOB types)
-                # headers and response_headers are TEXT, not BLOB
-                blob_columns = [
-                    "response_body",  # Check longer names first to avoid partial matches
-                    "response_data",
-                    "request_data",
-                    "body",
-                ]
+        # Fix for zxJDBC BLOB handling: Replace BLOB columns with CAST to TEXT
+        # 这步预处理只需做一次，重试时复用同一个 query
+        if USE_ZXJDBC:
+            import re as _re
 
-                # Check if query selects any BLOB columns without CAST
-                import re
+            # List of known BLOB columns that need CAST conversion (only actual BLOB types)
+            # headers and response_headers are TEXT, not BLOB
+            blob_columns = [
+                "response_body",  # Check longer names first to avoid partial matches
+                "response_data",
+                "request_data",
+                "body",
+            ]
 
-                for col in blob_columns:
-                    # Skip if already has CAST for this column
-                    if "CAST(" + col in query or "CAST(r." + col in query:
-                        continue
+            for col in blob_columns:
+                # Skip if already has CAST for this column
+                if "CAST(" + col in query or "CAST(r." + col in query:
+                    continue
 
-                    # Pattern to match column with optional table prefix (e.g., "r.body" or "body")
-                    # Use negative lookbehind to avoid matching if preceded by word character (e.g., response_body)
-                    # Use word boundary at the end to ensure complete match
-                    pattern = r"(?<!\w)(\w+\.)?(" + re.escape(col) + r")\b"
+                # Pattern to match column with optional table prefix (e.g., "r.body" or "body")
+                pattern = r"(?<!\w)(\w+\.)?(" + _re.escape(col) + r")\b"
 
-                    def replace_func(match):
-                        prefix = match.group(1) if match.group(1) else ""
-                        col_name = match.group(2)
-                        # Return: CAST(prefix+column AS TEXT) as column (without prefix in alias)
-                        return "CAST(" + prefix + col_name + " AS TEXT) as " + col_name
+                def replace_func(match):
+                    prefix = match.group(1) if match.group(1) else ""
+                    col_name = match.group(2)
+                    return "CAST(" + prefix + col_name + " AS TEXT) as " + col_name
 
-                    # Only replace in SELECT clause (before FROM)
-                    # Split query at FROM to avoid replacing in subqueries
-                    if " FROM " in query.upper():
-                        parts = re.split(
-                            r"\bFROM\b", query, maxsplit=1, flags=re.IGNORECASE
-                        )
-                        if len(parts) == 2:
-                            # Only replace in SELECT part
-                            parts[0] = re.sub(pattern, replace_func, parts[0])
-                            query = parts[0] + " FROM " + parts[1]
-                        else:
-                            query = re.sub(pattern, replace_func, query)
+                # Only replace in SELECT clause (before FROM)
+                if " FROM " in query.upper():
+                    parts = _re.split(
+                        r"\bFROM\b", query, maxsplit=1, flags=_re.IGNORECASE
+                    )
+                    if len(parts) == 2:
+                        parts[0] = _re.sub(pattern, replace_func, parts[0])
+                        query = parts[0] + " FROM " + parts[1]
                     else:
-                        query = re.sub(pattern, replace_func, query)
-
-            conn = self.get_connection()
-            if not conn:
-                print("[DB] Failed to get connection")
-                return []
-            cursor = conn.cursor()
-
-            # zxJDBC specific execution
-            if USE_ZXJDBC:
-                if params:
-                    cursor.execute(query, params)
+                        query = _re.sub(pattern, replace_func, query)
                 else:
-                    cursor.execute(query)
+                    query = _re.sub(pattern, replace_func, query)
 
-                # Some zxJDBC drivers (like sqlite-jdbc wrapper) might fail on fetchall
-                try:
+        attempt = 0
+        while attempt < retries:
+            conn = None
+            cursor = None
+            try:
+                conn = self.get_connection()
+                if not conn:
+                    print("[DB] Failed to get connection")
+                    return None  # 连接失败：返回 None，不再伪装成 []
+                cursor = conn.cursor()
+
+                # zxJDBC specific execution
+                if USE_ZXJDBC:
+                    if params:
+                        cursor.execute(query, params)
+                    else:
+                        cursor.execute(query)
+
+                    # Some zxJDBC drivers (like sqlite-jdbc wrapper) might fail on fetchall
+                    try:
+                        results = cursor.fetchall()
+                        print(
+                            "[DB] fetchall() returned {} rows".format(
+                                len(results) if results else 0
+                            )
+                        )
+                        return results if results else []
+                    except Exception as e_fetchall:
+                        # "not implemented" 等错误走兜底 BLOB CAST 重试
+                        error_str_fetchall = str(e_fetchall).lower()
+                        if (
+                            "not implemented" not in error_str_fetchall
+                            and "java" not in error_str_fetchall
+                        ):
+                            # 真正的查询异常，交给外层 except 处理
+                            raise
+                        print(
+                            "[DB] fetchall() failed: "
+                            + str(e_fetchall)
+                            + ", trying iteration..."
+                        )
+                        # Fallback iteration
+                        results = []
+                        try:
+                            row_count = 0
+                            while True:
+                                row = cursor.fetchone()
+                                if row is None:
+                                    break
+                                results.append(row)
+                                row_count += 1
+                            print("[DB] Iteration fetched {} rows".format(row_count))
+                            return results
+                        except Exception as e_iter:
+                            print("[DB] Iteration also failed: " + str(e_iter))
+                            # Last resort: try for loop
+                            try:
+                                for row in cursor:
+                                    results.append(row)
+                                print(
+                                    "[DB] For-loop fetched {} rows".format(
+                                        len(results)
+                                    )
+                                )
+                                return results
+                            except Exception as e_for:
+                                print("[DB] For-loop also failed: " + str(e_for))
+                                return results  # 返回已拿到的部分
+                else:
+                    # Standard sqlite3
+                    if params:
+                        cursor.execute(query, params)
+                    else:
+                        cursor.execute(query)
                     results = cursor.fetchall()
                     print(
-                        "[DB] fetchall() returned {} rows".format(
+                        "[DB] Standard sqlite3 returned {} rows".format(
                             len(results) if results else 0
                         )
                     )
                     return results if results else []
-                except Exception as e_fetchall:
+
+            except Exception as e:
+                error_msg = str(e)
+                error_str = error_msg.lower()
+                print("[DB] Exception in fetch_all: " + error_msg)
+                print("[DB] Exception type: " + str(type(e)))
+
+                # SQLITE_BUSY / database is locked：关连接重试（finally 会负责 close）
+                if (
+                    "database is locked" in error_str
+                    or "SQLITE_BUSY" in error_str
+                ):
+                    attempt += 1
                     print(
-                        "[DB] fetchall() failed: "
-                        + str(e_fetchall)
-                        + ", trying iteration..."
+                        "[DB] fetch_all locked, retrying {}/{}...".format(
+                            attempt, retries
+                        )
                     )
-                    # Fallback iteration
-                    results = []
                     try:
-                        row_count = 0
-                        while True:
-                            row = cursor.fetchone()
-                            if row is None:
-                                break
-                            results.append(row)
-                            row_count += 1
-                        print("[DB] Iteration fetched {} rows".format(row_count))
-                        return results
-                    except Exception as e_iter:
-                        print("[DB] Iteration also failed: " + str(e_iter))
-                        # Last resort: try for loop
-                        try:
-                            for row in cursor:
-                                results.append(row)
-                            print("[DB] For-loop fetched {} rows".format(len(results)))
-                            return results
-                        except Exception as e_for:
-                            print("[DB] For-loop also failed: " + str(e_for))
-                            return results  # Return whatever we got
-            else:
-                # Standard sqlite3
-                if params:
-                    cursor.execute(query, params)
-                else:
-                    cursor.execute(query)
-                results = cursor.fetchall()
-                print(
-                    "[DB] Standard sqlite3 returned {} rows".format(
-                        len(results) if results else 0
+                        time.sleep(0.5 * attempt)
+                    except Exception:
+                        pass
+                    continue
+
+                # zxJDBC "not implemented" 等错误：兜底 BLOB CAST 重试（保留原逻辑）
+                if "not implemented" in error_str or "java" in error_str:
+                    fallback_result = self._fetch_all_blob_fallback(
+                        conn, query, params
                     )
-                )
-                return results if results else []
-
-        except Exception as e:
-            # Handle specific zxJDBC "not implemented" error if fetchall fails
-            # Also catch "JavaException" which might wrap the underlying SQL error
-            error_str = str(e).lower()
-            print("[DB] Exception in fetch_all: " + str(e))
-            print("[DB] Exception type: " + str(type(e)))
-
-            if "not implemented" in error_str or "java" in error_str:
-                try:
-                    # Retry with BLOB columns cast to TEXT
-                    if USE_ZXJDBC:
-                        import re
-
-                        retry_query = query
-                        blob_columns = [
-                            "executed_request_data",
-                            "request_data",
-                            "response_data",
-                            "response_body",
-                            "request_data",
-                            "body",
-                        ]
-
-                        for col in blob_columns:
-                            if "CAST(" + col in retry_query or "CAST(r." + col in retry_query:
-                                continue
-
-                            pattern = r"(?<!\w)(\w+\.)?(" + re.escape(col) + r")\b"
-
-                            def replace_func(match):
-                                prefix = match.group(1) if match.group(1) else ""
-                                col_name = match.group(2)
-                                return "CAST(" + prefix + col_name + " AS TEXT) as " + col_name
-
-                            if " FROM " in retry_query.upper():
-                                parts = re.split(
-                                    r"\bFROM\b", retry_query, maxsplit=1, flags=re.IGNORECASE
-                                )
-                                if len(parts) == 2:
-                                    parts[0] = re.sub(pattern, replace_func, parts[0])
-                                    retry_query = parts[0] + " FROM " + parts[1]
-                                else:
-                                    retry_query = re.sub(pattern, replace_func, retry_query)
-                            else:
-                                retry_query = re.sub(pattern, replace_func, retry_query)
-
-                        print("[DB] Retrying with CAST conversion...")
-                        cursor2 = conn.cursor()
-                        cursor2.execute(retry_query)
-                        results = []
-                        while True:
-                            row = cursor2.fetchone()
-                            if row is None:
-                                break
-                            results.append(row)
-                        print("[DB] Retry fetched {} rows".format(len(results)))
-                        return results
-                except Exception as e2:
-                    print("[DB] Error fetching data (fallback): " + str(e2))
+                    if fallback_result is not None:
+                        return fallback_result
+                    # 兜底失败：返回 None，不再伪装成 []
+                    print("[DB] fetch_all BLOB fallback failed, returning None")
                     import traceback
 
                     traceback.print_exc()
-                    return []
+                    return None
 
-            print("[DB] Error fetching data: " + str(e))
+                # 非锁、非 BLOB 异常：返回 None
+                print("[DB] Error fetching data: " + error_msg)
+                import traceback
+
+                traceback.print_exc()
+                return None
+            finally:
+                if cursor:
+                    try:
+                        cursor.close()
+                    except:
+                        pass
+                if conn:
+                    try:
+                        conn.close()
+                    except:
+                        pass
+
+        print("[DB] fetch_all failed after {} retries.".format(retries))
+        return None
+
+    def _fetch_all_blob_fallback(self, conn, query, params=None):
+        """
+        兜底重试：把更多 BLOB 列（含 executed_request_data）转成 CAST(... AS TEXT) 再查一次。
+        返回：
+            list: 兜底成功（可能为 []）
+            None: 兜底失败
+        """
+        if not conn:
+            return None
+        try:
+            if not USE_ZXJDBC:
+                return None
+
+            import re
+
+            retry_query = query
+            blob_columns = [
+                "executed_request_data",
+                "request_data",
+                "response_data",
+                "response_body",
+                "request_data",
+                "body",
+            ]
+
+            for col in blob_columns:
+                if "CAST(" + col in retry_query or "CAST(r." + col in retry_query:
+                    continue
+
+                pattern = r"(?<!\w)(\w+\.)?(" + re.escape(col) + r")\b"
+
+                def replace_func(match):
+                    prefix = match.group(1) if match.group(1) else ""
+                    col_name = match.group(2)
+                    return "CAST(" + prefix + col_name + " AS TEXT) as " + col_name
+
+                if " FROM " in retry_query.upper():
+                    parts = re.split(
+                        r"\bFROM\b", retry_query, maxsplit=1, flags=re.IGNORECASE
+                    )
+                    if len(parts) == 2:
+                        parts[0] = re.sub(pattern, replace_func, parts[0])
+                        retry_query = parts[0] + " FROM " + parts[1]
+                    else:
+                        retry_query = re.sub(pattern, replace_func, retry_query)
+                else:
+                    retry_query = re.sub(pattern, replace_func, retry_query)
+
+            print("[DB] Retrying with CAST conversion...")
+            cursor2 = conn.cursor()
+            try:
+                if params:
+                    cursor2.execute(retry_query, params)
+                else:
+                    cursor2.execute(retry_query)
+                results = []
+                while True:
+                    row = cursor2.fetchone()
+                    if row is None:
+                        break
+                    results.append(row)
+                print("[DB] Retry fetched {} rows".format(len(results)))
+                return results
+            finally:
+                try:
+                    cursor2.close()
+                except:
+                    pass
+        except Exception as e2:
+            print("[DB] Error fetching data (fallback): " + str(e2))
             import traceback
 
             traceback.print_exc()
-            return []
-        finally:
-            if cursor:
-                try:
-                    cursor.close()
-                except:
-                    pass
-            if conn:
-                try:
-                    conn.close()
-                except:
-                    pass
+            return None
 
     def init_db(self):
         # Using direct execution for init to keep it simple, or migrate to execute_query
@@ -394,11 +467,22 @@ class DatabaseManager:
             if conn:
                 cursor = conn.cursor()
 
-                # Enable WAL mode for better concurrency
+                # Enable WAL mode for better concurrency —— 不再静默吞错
                 try:
                     cursor.execute("PRAGMA journal_mode=WAL;")
-                except:
-                    pass
+                    try:
+                        wal_result = cursor.fetchone()
+                    except Exception:
+                        wal_result = None
+                    print("[DB] PRAGMA journal_mode=WAL => " + str(wal_result))
+                except Exception as e:
+                    print("[DB] WARN: failed to set WAL: " + str(e))
+                # busy_timeout: 遇到锁时等待 5000ms 再报错，而非立即失败
+                try:
+                    cursor.execute("PRAGMA busy_timeout=5000;")
+                    print("[DB] PRAGMA busy_timeout=5000 set on init connection")
+                except Exception as e:
+                    print("[DB] WARN: failed to set busy_timeout on init: " + str(e))
 
                 # 1. raw_requests table
                 cursor.execute(
