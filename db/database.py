@@ -53,8 +53,6 @@ class DatabaseManager:
 
                             # Method 2: sys.add_package (Jython specific, sometimes needed)
                             try:
-                                import sys
-
                                 if hasattr(sys, "add_package"):
                                     sys.add_package(jar_path)
                             except:
