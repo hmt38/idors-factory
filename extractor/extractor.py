@@ -22,16 +22,14 @@ class ParameterExtractor:
 
     def _is_blacklisted(self, param_name):
         """Check if parameter is in blacklist"""
+        # 通过 ConfigManager 读取黑名单 (解耦 GUI)
         try:
-            extender = getattr(self.db_manager, "extender", None)
-            if extender and hasattr(extender, "blacklistParams"):
-                blacklist_text = extender.blacklistParams.getText().strip()
-                if blacklist_text:
-                    blacklist = [p.strip() for p in blacklist_text.split(",")]
-                    return param_name in blacklist
-        except:
-            pass
-        return False
+            from api.config_manager import ConfigManager
+            cm = ConfigManager()
+            blacklist = cm.get_blacklist_set()
+            return param_name in blacklist
+        except Exception:
+            return False
 
     def _set_progress(self, message, indeterminate=None):
         try:
@@ -74,30 +72,25 @@ class ParameterExtractor:
         self._set_progress("Extracting Parameters: 0/{}".format(total_requests), False)
 
 
-        # Initialize LLM Helper if enabled
-        extender = getattr(self.db_manager, "extender", None)
+        # Initialize LLM Helper if enabled (通过 ConfigManager 读取配置, 解耦 GUI)
         llm_helper = None
-        if extender:
-            try:
-                if hasattr(extender, "enableLlm"):
-                    if extender.enableLlm.isSelected():
-                        llm_helper = LLMHelper(
-                            extender.llmBaseUrl.getText(),
-                            extender.llmApiKey.getText(),
-                            extender.llmModel.getText(),
-                            verify_ssl=not extender.llmDisableSslVerification.isSelected()
-                            if hasattr(extender, "llmDisableSslVerification")
-                            else True,
-                        )
-                        print("[Extractor] LLM Helper initialized successfully.")
-                    else:
-                        print("[Extractor] LLM Analysis is DISABLED in configuration.")
-                else:
-                    print("[Extractor] Error: extender has no enableLlm attribute.")
-            except Exception as e_init:
-                print("[Extractor] Error initializing LLM Helper: " + str(e_init))
-        else:
-            print("[Extractor] Warning: extender reference not found in db_manager.")
+        cm = None
+        try:
+            from api.config_manager import ConfigManager
+            cm = ConfigManager()
+            config = cm.get_llm_config()
+            if config["enabled"]:
+                llm_helper = LLMHelper(
+                    config["base_url"],
+                    config["api_key"],
+                    config["model"],
+                    verify_ssl=config["verify_ssl"],
+                )
+                print("[Extractor] LLM Helper initialized successfully.")
+            else:
+                print("[Extractor] LLM Analysis is DISABLED in configuration.")
+        except Exception as e_init:
+            print("[Extractor] Error initializing LLM Helper: " + str(e_init))
 
         # Step 2: Process data without holding an open cursor to the table we are reading from
         for index, row in enumerate(rows, 1):
@@ -186,7 +179,7 @@ class ParameterExtractor:
                     }
 
                     # A. Assist Parameter Extraction
-                    if extender.llmExtractParams.isSelected():
+                    if cm.get_bool("llm_extract_params", True):
                         try:
                             print(
                                 "[Extractor] Running LLM Parameter Extraction for Req ID "
@@ -211,7 +204,7 @@ class ParameterExtractor:
                             traceback.print_exc()
 
                     # B. Generate Parameter Values (Fuzzing)
-                    if extender.llmGenerateValues.isSelected():
+                    if cm.get_bool("llm_generate_values", True):
                         try:
                             print(
                                 "[Extractor] Running LLM Value Generation for Req ID "

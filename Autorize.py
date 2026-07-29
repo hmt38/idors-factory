@@ -46,7 +46,15 @@ class BurpExtender(IBurpExtender, IHttpListener, IProxyListener, IExtensionState
             self.db_manager = DatabaseManager()
             self.db_manager.extender = self  # Link extender to db_manager
             print("DatabaseManager initialized successfully.")
-            
+
+            # 初始化 ConfigManager (配置管理单例)
+            from api.config_manager import ConfigManager
+            self.config_manager = ConfigManager(self.db_manager)
+            self.config_manager.set_extender(self)
+
+            # 从 GUI 同步配置到 ConfigManager
+            self.config_manager.sync_from_gui(self)
+
             # Initialize Extractor
             from extractor.extractor import ParameterExtractor
             self.extractor = ParameterExtractor(self.db_manager)
@@ -62,7 +70,17 @@ class BurpExtender(IBurpExtender, IHttpListener, IProxyListener, IExtensionState
                 self.run_auto_idor_cycle, 5, 5, TimeUnit.MINUTES
             )
             print("Auto IDOR scheduler initialized (disabled by default).")
-            
+
+            # 启动 HTTP API Server (后台线程)
+            try:
+                from api.http_server import ApiService
+                self.api_service = ApiService(self)
+                self.api_service.start()
+                print("[Autorize] HTTP API server started on 127.0.0.1:8899")
+            except Exception as e:
+                print("[Autorize] Failed to start HTTP API server: " + str(e))
+                self.api_service = None
+
         except Exception as e:
             print("Failed to initialize DatabaseManager or Extractor: " + str(e))
             import traceback
@@ -201,6 +219,8 @@ class BurpExtender(IBurpExtender, IHttpListener, IProxyListener, IExtensionState
     # implement IExtensionStateListener
     #
     def extensionUnloaded(self):
+        if hasattr(self, "api_service") and self.api_service:
+            self.api_service.stop()
         self.executor.shutdown()
         self.scheduler.shutdown()
         print "Autorize extension unloaded."

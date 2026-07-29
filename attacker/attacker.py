@@ -14,36 +14,33 @@ class AttackEngine:
         self.llm_helper = None
 
     def _get_blacklist_params(self):
+        # 通过 ConfigManager 读取黑名单 (解耦 GUI)
         try:
-            extender = getattr(self.db_manager, "extender", None)
-            if extender and hasattr(extender, "blacklistParams"):
-                blacklist_text = extender.blacklistParams.getText().strip()
-                if blacklist_text:
-                    return set(
-                        [p.strip() for p in blacklist_text.split(",") if p.strip()]
-                    )
-        except:
-            pass
-        return set()
+            from api.config_manager import ConfigManager
+            cm = ConfigManager()
+            return cm.get_blacklist_set()
+        except Exception:
+            return set()
 
     def _is_blacklisted(self, param_name):
         return param_name in self._get_blacklist_params()
 
     def _init_llm(self):
+        # 通过 ConfigManager 读取 LLM 配置 (解耦 GUI)
         try:
-            extender = self.db_manager.extender
-            if extender and extender.enableLlm.isSelected():
+            from api.config_manager import ConfigManager
+            cm = ConfigManager()
+            config = cm.get_llm_config()
+            if config["enabled"]:
                 self.llm_helper = LLMHelper(
-                    extender.llmBaseUrl.getText(),
-                    extender.llmApiKey.getText(),
-                    extender.llmModel.getText(),
-                    verify_ssl=not extender.llmDisableSslVerification.isSelected()
-                    if hasattr(extender, "llmDisableSslVerification")
-                    else True,
+                    config["base_url"],
+                    config["api_key"],
+                    config["model"],
+                    verify_ssl=config["verify_ssl"],
                 )
             else:
                 self.llm_helper = None
-        except:
+        except Exception:
             self.llm_helper = None
 
     def _set_progress_message(self, message, indeterminate=None):
@@ -280,9 +277,11 @@ class AttackEngine:
 
         # Identify API Risk (if enabled)
         try:
+            from api.config_manager import ConfigManager
+            cm = ConfigManager()
             if (
                 self.llm_helper
-                and self.db_manager.extender.llmIdentifyRisk.isSelected()
+                and cm.get_bool("llm_identify_risk", True)
             ):
                 print("[Attacker] Calling LLM Identify Risk for " + api_signature)
                 self._identify_api_risk(api_signature, req)

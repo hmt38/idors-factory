@@ -24,87 +24,78 @@ class DatabaseManager:
         self.conn = None
         self.cursor = None
 
-        # Determine plugin root and database path
+        # Determine database path relative to this file (e.g., Autorize/db/../autorize_traffic.db)
         try:
             current_dir = os.path.dirname(os.path.abspath(__file__))
-            self._plugin_root = os.path.dirname(current_dir)
-            self.db_path = os.path.join(self._plugin_root, db_path)
+            # Save DB in the parent directory of 'db' folder, i.e., in 'Autorize' root
+            plugin_root = os.path.dirname(current_dir)
+            self.db_path = os.path.join(plugin_root, db_path)
             print("Calculated database path: " + self.db_path)
         except Exception:
-            self._plugin_root = None
+            # Fallback to current working directory if __file__ is not available
             if not os.path.isabs(self.db_path):
                 self.db_path = os.path.join(os.getcwd(), self.db_path)
             print("Fallback database path: " + self.db_path)
 
-        # Ensure SQLite JDBC driver is available
+        # Ensure lib jars are in sys.path (in case Autorize.py didn't pick them up or hot reload issues)
         if USE_ZXJDBC:
-            self._load_jdbc_driver()
+            try:
+                lib_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib")
+                if os.path.exists(lib_dir):
+                    for jar in os.listdir(lib_dir):
+                        if jar.endswith(".jar"):
+                            jar_path = os.path.join(lib_dir, jar)
+
+                            # Method 1: sys.path.append (Standard Python)
+                            if jar_path not in sys.path:
+                                sys.path.append(jar_path)
+                                print("Added to sys.path: " + jar_path)
+
+                            # Method 2: sys.add_package (Jython specific, sometimes needed)
+                            try:
+                                import sys
+
+                                if hasattr(sys, "add_package"):
+                                    sys.add_package(jar_path)
+                            except:
+                                pass
+
+                            # Method 3: java.net.URLClassLoader (Java specific, forceful loading)
+                            try:
+                                from java.io import File
+                                from java.net import URL, URLClassLoader
+                                from java.lang import ClassLoader
+
+                                method = URLClassLoader.getDeclaredMethod(
+                                    "addURL", [URL]
+                                )
+                                method.setAccessible(True)
+                                method.invoke(
+                                    ClassLoader.getSystemClassLoader(),
+                                    [File(jar_path).toURI().toURL()],
+                                )
+                                print("Added to SystemClassLoader: " + jar_path)
+                            except Exception as e:
+                                print("Failed to add to SystemClassLoader: " + str(e))
+
+                # Explicitly load the driver class
+                try:
+                    from java.lang import Class
+
+                    # Force reload logic
+                    try:
+                        Class.forName("org.sqlite.JDBC")
+                    except:
+                        # If failed, try to load using the jar path explicitly via URLClassLoader if not system loader
+                        pass
+
+                    print("Loaded org.sqlite.JDBC driver successfully")
+                except Exception as e:
+                    print("Failed to load org.sqlite.JDBC driver: " + str(e))
+            except Exception as e:
+                print("[DB] WARN: jar loading failed: " + str(e))
 
         self.init_db()
-
-    def _load_jdbc_driver(self):
-        """Load SQLite JDBC driver jar into classpath if not already present."""
-        try:
-            from java.lang import Class
-
-            # First check if driver is already available (e.g. loaded by Burp)
-            try:
-                Class.forName("org.sqlite.JDBC")
-                print("[DB] SQLite JDBC driver already available in classpath")
-                return
-            except Exception:
-                pass  # Not yet loaded, try to load from lib dir
-
-            # Find lib directory
-            lib_dir = None
-            if self._plugin_root:
-                lib_dir = os.path.join(self._plugin_root, "lib")
-            if not lib_dir or not os.path.exists(lib_dir):
-                db_parent = os.path.dirname(os.path.abspath(self.db_path))
-                lib_dir = os.path.join(db_parent, "lib")
-
-            print("[DB] Looking for jars in: " + str(lib_dir))
-
-            if not os.path.exists(lib_dir):
-                print("[DB] ERROR: lib directory not found, SQLite JDBC driver cannot be loaded")
-                return
-
-            jars = [f for f in os.listdir(lib_dir) if f.endswith(".jar")]
-            print("[DB] Found {} jar file(s) in lib".format(len(jars)))
-
-            for jar in jars:
-                jar_path = os.path.join(lib_dir, jar)
-                print("[DB] Processing jar: " + jar_path)
-
-                # Method 1: sys.path.append
-                if jar_path not in sys.path:
-                    sys.path.append(jar_path)
-                    print("[DB] Added to sys.path: " + jar_path)
-
-                # Method 2: URLClassLoader.addURL (forceful, most reliable for JVM)
-                try:
-                    from java.io import File
-                    from java.net import URL, URLClassLoader
-                    from java.lang import ClassLoader
-
-                    method = URLClassLoader.getDeclaredMethod("addURL", [URL])
-                    method.setAccessible(True)
-                    method.invoke(
-                        ClassLoader.getSystemClassLoader(),
-                        [File(jar_path).toURI().toURL()],
-                    )
-                    print("[DB] Added to SystemClassLoader: " + jar_path)
-                except Exception as e:
-                    print("[DB] Failed to add to SystemClassLoader: " + str(e))
-
-            # Verify driver loaded
-            try:
-                Class.forName("org.sqlite.JDBC")
-                print("[DB] SQLite JDBC driver loaded successfully")
-            except Exception as e:
-                print("[DB] ERROR: SQLite JDBC driver not found after loading jars: " + str(e))
-        except Exception as e:
-            print("[DB] ERROR: jar loading failed: " + str(e))
 
     def get_connection(self):
         try:
@@ -626,6 +617,21 @@ class DatabaseManager:
                 # 4. api_metadata table (For LLM risk analysis)
                 cursor.execute(
                     "CREATE TABLE IF NOT EXISTS api_metadata (api_signature TEXT PRIMARY KEY, is_sensitive BOOLEAN, risk_reason TEXT, analyzed_at DATETIME DEFAULT CURRENT_TIMESTAMP)"
+                )
+
+                # 5. config table (key-value store for persistent configuration)
+                cursor.execute(
+                    "CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)"
+                )
+
+                # 6. users table (persistent user configuration)
+                cursor.execute(
+                    "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT, identify_string TEXT, headers_text TEXT)"
+                )
+
+                # 7. match_replace_rules table (persistent Match/Replace rules)
+                cursor.execute(
+                    "CREATE TABLE IF NOT EXISTS match_replace_rules (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, rule_type TEXT, match_text TEXT, replace_text TEXT, FOREIGN KEY(user_id) REFERENCES users(id))"
                 )
 
                 conn.commit()

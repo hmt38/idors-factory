@@ -893,7 +893,7 @@ class IDORAttackPanel(JPanel, IMessageEditorController):
                     self.extender._callbacks,
                     self.extender._helpers,
                     llm_config,
-                    limit,
+                    50,
                     self._build_hidden_param_config(),
                     self._is_apply_hidden_param_on_execute(),
                 )

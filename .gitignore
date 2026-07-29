@@ -13,3 +13,4 @@
 *.log
 output.txt
 running-*.log
+__pycache__/
