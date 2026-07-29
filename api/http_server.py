@@ -3,7 +3,7 @@
 """
 ApiService - HTTP REST API 服务.
 
-提供机机接口供 ai agent 调用, 监听 127.0.0.1:8899.
+提供机机接口供 ai agent 调用, 监听 0.0.0.0:8899.
 Jython 环境用 com.sun.net.httpserver.HttpServer, CPython 环境用 BaseHTTPServer.
 
 端点设计:
@@ -43,7 +43,7 @@ from api.config_manager import ConfigManager
 # 端口配置
 # ----------------------------------------------------------------------------
 API_PORT = 8899
-API_HOST = "127.0.0.1"
+API_HOST = "0.0.0.0"
 
 
 class ApiService(object):
@@ -64,7 +64,11 @@ class ApiService(object):
     # 服务器启动/停止
     # ------------------------------------------------------------------
     def start(self):
-        """启动 HTTP server, 监听 127.0.0.1:8899."""
+        """启动 HTTP server, 监听 0.0.0.0:8899."""
+        # 先停止已有的 server (防止端口占用)
+        if self.server is not None:
+            self.stop()
+
         try:
             from com.sun.net.httpserver import HttpServer
             from java.net import InetSocketAddress
@@ -133,6 +137,7 @@ class ApiService(object):
 
         self._handler_cls = CPythonHandler
         self._httpd = HTTPServer((API_HOST, API_PORT), CPythonHandler)
+        self._httpd.allow_reuse_address = True
         t = threading.Thread(target=self._httpd.serve_forever, daemon=True)
         t.start()
         self.server = self._httpd
@@ -207,6 +212,7 @@ class ApiService(object):
             ("POST",   r"/api/action/generate-attacks$",      "_handle_action_generate"),
             ("POST",   r"/api/action/auto-idor$",             "_handle_action_auto_idor"),
             ("POST",   r"/api/action/batch-attack-get$",       "_handle_action_batch"),
+            ("POST",   r"/api/action/execute-attack$",          "_handle_action_execute_attack"),
             ("GET",    r"/api/attacks$",                       "_handle_get_attacks"),
             ("GET",    r"/api/attacks/(\d+)$",                 "_handle_get_attack_detail"),
             ("POST",   r"/api/recommend$",                     "_handle_recommend"),
@@ -442,6 +448,36 @@ class ApiService(object):
             return self._ok(summary, "Batch attack completed")
         except Exception as e:
             return self._error("Batch attack failed: " + str(e))
+
+    # ------------------------------------------------------------------
+    # POST /api/action/execute-attack
+    # ------------------------------------------------------------------
+    def _handle_action_execute_attack(self, params, query, body):
+        """
+        执行单个选定攻击 (等价于 GUI 的 Execute Selected).
+        body: {"attack_id": 1}
+        """
+        ext = self.extender
+        if not ext or not hasattr(ext, "attack_engine"):
+            return self._error("AttackEngine not available")
+        attack_id = body.get("attack_id")
+        if not attack_id:
+            return self._error("Missing 'attack_id' in body")
+        try:
+            llm_config = self.config_manager.get_llm_config()
+            result = ext.attack_engine.execute_attack(
+                int(attack_id),
+                ext._callbacks,
+                ext._helpers,
+                llm_config,
+                body.get("hidden_param_config", None),
+                body.get("apply_hidden_param_on_execute", False),
+            )
+            self.config_manager.notify_attacks_changed()
+            return self._ok({"attack_id": int(attack_id), "result": result},
+                            "Attack {} executed".format(attack_id))
+        except Exception as e:
+            return self._error("Execute attack failed: " + str(e))
 
     # ------------------------------------------------------------------
     # GET /api/attacks

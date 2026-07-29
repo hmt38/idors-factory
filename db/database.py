@@ -51,16 +51,7 @@ class DatabaseManager:
                                 sys.path.append(jar_path)
                                 print("Added to sys.path: " + jar_path)
 
-                            # Method 2: sys.add_package (Jython specific, sometimes needed)
-                            try:
-                                import sys
-
-                                if hasattr(sys, "add_package"):
-                                    sys.add_package(jar_path)
-                            except:
-                                pass
-
-                            # Method 3: java.net.URLClassLoader (Java specific, forceful loading)
+                            # Method 2: java.net.URLClassLoader (Java specific, forceful loading)
                             try:
                                 from java.io import File
                                 from java.net import URL, URLClassLoader

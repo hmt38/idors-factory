@@ -1,161 +1,281 @@
-# Autorize + IDOR Detection Plugin
+# IDORs Factory Agent 使用文档
 
-本插件是在原版 Autorize 基础上进行的二次开发，新增了 **智能越权 (IDOR) 检测** 功能。它通过采集不同用户的流量，自动分析参数特征，并构造重放攻击来检测越权漏洞。
+> 本文档指导 AI agent 通过 HTTP API 调用 IDORs Factory 插件，完成 IDOR 漏洞检测的全流程。
 
-## 主要功能
+---
 
-1.  **多用户流量采集**: 自动识别并区分 User A（攻击者）和 User B（受害者）的流量。
-2.  **智能参数提取**: 自动从流量中提取 URL 路径参数、Query 参数和 JSON Body 参数。
-3.  **越权攻击重放**: 基于提取的参数，自动构造并发送越权探测请求。
-4.  **智能结果分析**: 结合状态码分析与 LLM（大模型）辅助判断，准确识别越权漏洞。
+## 一、前置条件
 
-## 安装指南
+| 条件 | 说明 |
+|------|------|
+| Burp Suite | 已加载 IDORs Factory 插件，输出窗口显示 `[API] HTTP server started on 0.0.0.0:8899` |
+| API 地址 | `http://<burp_host>:8899`（默认 0.0.0.0:8899，可远程访问） |
+| Burp 代理 | `127.0.0.1:8080`（用于拦截 agent 发出的流量） |
+| 测试账号 | hmt1:1234567 / hmt2:1234567 |
 
-由于本插件使用了 SQLite 数据库来存储大量分析数据，在 Jython 环境下运行需要额外的 JDBC 驱动配置。
+**验证 API 可用：**
+```bash
+curl http://127.0.0.1:8899/api/status
+# {"status":"ok","data":{"running":true,"db_connected":true,...}}
+```
 
-### 1. 环境要求
-- **Burp Suite**: Professional 或 Community 版本。
-- **Jython**: 版本 2.7.x (推荐 2.7.3)。
+---
 
-### 2. Jython 环境配置 (必须!)
-如果您尚未在 Burp Suite 中配置 Python 环境，请按照以下步骤操作：
+## 二、API 端点清单
 
-1.  **下载 Jython**:
-    - 访问 [Jython 官网](https://www.jython.org/download) 下载 **Jython Standalone JAR** (例如 `jython-standalone-2.7.3.jar`)。
-    - 将下载的 JAR 文件保存到您方便管理的目录中。
+### 配置类
 
-2.  **配置 Burp Python 环境**:
-    - 在 Burp Suite 中，点击顶部菜单 **Extensions** (旧版为 Extender) -> **Extensions settings** (或 Options)。
-    - 找到 **Python Environment** 设置区域。
-    - 点击 **Select file**，选择刚才下载的 `jython-standalone-2.7.3.jar` 文件。
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/config` | 读取全部配置（LLM、用户、黑名单、开关） |
+| PUT | `/api/config/llm` | 设置 LLM 配置 |
+| PUT | `/api/config/user/{id}/identify` | 设置用户标识字符串 |
+| PUT | `/api/config/blacklist` | 设置黑名单参数 |
 
-### 3. JDBC 驱动配置 (必须!)
-由于 Jython 不包含 C 语言实现的 `sqlite3` 模块，我们需要使用 Java 的 JDBC 驱动。**本插件已内置该驱动，您无需额外下载。**
+### 动作类（按钮）
 
-1.  **定位驱动文件**:
-    - 插件目录下的 `lib` 文件夹中已包含 `sqlite-jdbc-3.42.0.0.jar`。
-    - 路径示例: `E:\idors-tools\test\Autorize\lib`
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/action/autorize` | 开关 Autorize 拦截 |
+| POST | `/api/action/extract-params` | 提取参数 |
+| POST | `/api/action/generate-attacks` | 生成攻击 |
+| POST | `/api/action/execute-attack` | 执行单个选定攻击 |
+| POST | `/api/action/batch-attack-get` | 批量执行 GET 攻击 |
+| POST | `/api/action/auto-idor` | 开关 Auto IDOR 定时循环 |
 
-2.  **配置 Burp Java 环境 (关键步骤)**:
-    - 在 Burp Suite 中，点击顶部菜单 **Extensions** -> **Extensions settings**。
-    - 找到 **Java Environment** 设置区域。
-    - 在 **Folder for loading library JARs** (加载库 JAR 的文件夹) 中，点击 **Select folder**。
-    - 选择本插件的 `lib` 目录：`E:\idors-tools\test\Autorize\lib`。
-    - **重启 Burp Suite** (或重新加载插件) 以使更改生效。
+### 参数推荐类
 
-### 4. 加载插件
-1.  打开 Burp Suite -> **Extensions** -> **Add**。
-2.  Extension type 选择 **Python**。
-3.  Extension file 选择 `E:\idors-tools\test\Autorize\Autorize.py`。
-4.  点击 Next，确保 Output 标签页没有报错。
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/recommend` | 获取参数推荐值 |
+| POST | `/api/recommend/apply` | 应用推荐值到用户规则 |
 
-## 使用说明
+### Header/Cookie 增改类
 
-### 第一阶段：流量采集 (Traffic Collection)
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/user/{id}/header` | 新增/更新用户 Header |
+| POST | `/api/user/{id}/cookie` | 新增/更新用户 Cookie |
+| DELETE | `/api/user/{id}/header/{key}` | 删除用户 Header |
 
-1.  **配置用户标识**:
-    - 加载插件后，进入 **Autorize** 标签页 -> **Users** 子标签页。
-    - 添加用户（如 User A 和 User B），并分别配置他们的 Cookie/Token。
-    - 确保在 Header配置中填写能唯一标识该用户的字符串（例如 Cookie 中的 `session=UserA`），以便插件自动归类流量。
+### 结果查询类
 
-2.  **生成流量**:
-    - 打开浏览器，配置好 Burp 代理。
-    - 登录 User A 账号，访问业务页面（如“个人中心”、“订单列表”）。
-    - 登录 User B 账号，访问**相同**的业务页面。
-    - 插件会自动检测流量并记录到数据库中。
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/attacks` | 查询攻击结果列表 |
+| GET | `/api/attacks/{id}` | 查询单个攻击详情 |
+| GET | `/api/status` | 服务状态检查 |
 
-### 第二阶段：参数提取 (Parameter Extraction)
+---
 
-1.  **自动提取**:
-    - 插件会在后台自动分析采集到的流量。
-    - 点击 **Configuration** -> **Extract Params** 按钮可手动触发提取。
-    - **新增进度条**: 操作过程中，下方进度条会实时显示 "Extracting Parameters..." 状态。
-    - 插件会识别 URL 路径参数（如 `/users/123` 中的 `123`）、Query 参数（`?id=123`）以及 JSON Body 中的参数。
-   如果启用了LLM,LLM会进行参数的构造尝试，如下图，
-   ![alt text](image-4.png)
-   可以看到数据库中有LLM自动生成的fuzz结果
+## 三、典型工作流（12 步）
 
-### 第三阶段：攻击生成 (Attack Generation)
+```
+ 1. 配置用户标识          PUT  /api/config/user/1/identify
+ 2. 配置用户标识          PUT  /api/config/user/2/identify
+ 3. 配置 LLM（可选）      PUT  /api/config/llm
+ 4. 开启 Autorize        POST /api/action/autorize {"on": true}
+ 5. 发送流量（通过代理）   curl -x http://127.0.0.1:8080 http://target/api/users/me
+ 6. 提取参数             POST /api/action/extract-params
+ 7. 获取参数推荐          POST /api/recommend
+ 8. 应用推荐值            POST /api/recommend/apply
+ 9. 生成攻击             POST /api/action/generate-attacks
+10. 执行单个攻击          POST /api/action/execute-attack {"attack_id": 1}
+11. 批量执行 GET 攻击    POST /api/action/batch-attack-get {"limit": 50}
+12. 查询结果             GET  /api/attacks
+```
 
-1.  **生成攻击**:
-    - 切换到 **IDOR Attacks** 标签页（或在 Configuration 页点击 **Generate Attacks**）。
-    - **智能排列组合**: 插件会自动分析 User A 的请求，尝试将其中的敏感参数（如 ID、User Code 等）替换为 User B 的对应值。
-    - **组合策略**: 如果一个请求中有多个可替换参数（例如 `user_id` 和 `order_id`），插件会生成所有可能的组合（仅替换 `user_id`、仅替换 `order_id`、同时替换两者），以确保覆盖各种测试场景。
-    - **后台处理**: 点击生成按钮后，进度条会滚动显示 "Generating Attacks..."，生成完毕后自动刷新列表。
-    - 生成的攻击列表会显示在左侧表格中。
+---
 
-### 第四阶段：执行与检测 (Execution & Detection)
+## 四、curl 示例
 
-1.  **审查攻击列表**:
-    - 在 **IDOR Attacks** 面板中查看生成的攻击向量。
-    - **高危操作高亮**: 涉及敏感操作（如 `POST`, `PUT`, `DELETE` 方法或路径包含 `delete`, `update` 等关键词）的 API 会以 **红色高亮** 显示，提示测试人员需人工确认后再执行，避免误删数据。
+### 1. 配置用户标识
 
-2.  **执行攻击**:
-    - 选中一条或多条攻击记录。
-    - 点击 **Execute Selected** 按钮。
-    - 插件会重放请求：保持 User A 的 Session（Cookie/Header），但参数已替换为 User B 的值。
-    - **自动刷新**: 执行完成后，右侧详情面板会自动刷新，显示最新的响应结果。
+```bash
+# 用户1标识（从登录获取的 Cookie）
+curl -X PUT http://127.0.0.1:8899/api/config/user/1/identify \
+  -H "Content-Type: application/json" \
+  -d '{"identify_string": "Cookie: session=hmt1_token"}'
 
-    替换值的规则是：将重要度超过阈值的所有参数，1个或多个，（排列组合）替换为b相应的参数，假如一个请求有2个参数且均超过阈值，会排列组合产生3个数据包，如下：
-![alt text](image.png)
-![alt text](image-1.png)
-![alt text](image-2.png)
-    使用指南
-![alt text](image-3.png)
+# 用户2标识
+curl -X PUT http://127.0.0.1:8899/api/config/user/2/identify \
+  -H "Content-Type: application/json" \
+  -d '{"identify_string": "Cookie: session=hmt2_token"}'
+```
 
-3.  **结果分析 (右侧详情面板)**:
-    - **Attack Request/Response**: 查看实际发送的攻击请求及其响应。
-    - **Original Request/Response**: 查看原始请求（User A 的正常请求）及其响应，方便对比。
-    - **Diff 面板**: 清晰对比原始请求与攻击请求的关键差异（如参数替换情况）。
-    - **状态与颜色**:
-        - **绿色 (SAFE)**: 攻击失败，目标安全（响应码与原始请求一致或被拒绝）。
-        - **红色 (VULNERABLE)**: 攻击成功，存在越权漏洞（需开启 LLM 辅助判断或根据状态码差异）。
-        - **黄色 (SENT)**: 请求已发送，等待进一步分析。
-    - **LLM 智能分析**:
-        - 在 **Configuration** 中配置 LLM (OpenAI 兼容接口)。
-        - 开启 LLM 后，插件会自动将原始请求、攻击请求及响应发送给模型，由 AI 判断是否存在越权风险。
-        颜色不同表示ai分析结果不同，如下图所示
-        ![alt text](image-5.png)
+### 2. 配置 LLM
 
-## AI 智能分析功能详解 (AI-Powered Analysis)
+```bash
+curl -X PUT http://127.0.0.1:8899/api/config/llm \
+  -H "Content-Type: application/json" \
+  -d '{
+    "enable": true,
+    "base_url": "https://api.openai.com/v1",
+    "api_key": "sk-xxx",
+    "model": "gpt-4",
+    "verify_ssl": true
+  }'
+```
 
-本插件深度集成了 LLM (大语言模型) 能力，旨在解决传统正则匹配的局限性。AI 功能模块化设计，提供四个独立的子功能开关，您可以根据需求灵活配置。
+### 3. 开启 Autorize
 
-### 1. 配置与测试
-- **设置**: 在 **Configuration** 标签页填写 `LLM Base URL` (如 `https://api.openai.com/v1`)、`LLM API Key` 和 `Model` (如 `gpt-3.5-turbo`)。
-- **连接测试**: 点击 **Test LLM** 按钮，插件会发送一个简单的测试请求。测试结果（Success/Failed）将实时显示在下方的进度条中，帮助您快速验证配置是否正确。
+```bash
+curl -X POST http://127.0.0.1:8899/api/action/autorize \
+  -H "Content-Type: application/json" \
+  -d '{"on": true}'
+```
 
-### 2. 四大核心 AI 功能
+### 4. 发送流量（通过 Burp 代理）
 
-#### A. 辅助参数提取 (Assist Param Extraction)
-- **原理**: 传统的正则提取容易漏掉嵌套在复杂 JSON 结构或非标准格式中的参数。开启此功能后，插件会将未识别的请求内容发送给 LLM。
-- **效果**: AI 能够理解语义，提取出如 `user_code`, `account_uuid` 等非常规命名的敏感参数，并将其加入参数池供后续攻击使用。
+```bash
+# 用用户1的 Cookie 访问目标
+curl -x http://127.0.0.1:8080 \
+  -H "Cookie: session=hmt1_token" \
+  http://198.18.0.1:5888/api/users/me
 
-#### B. 构造参数值 (Generate Param Values)
-- **原理**: 仅替换捕获到的参数值可能覆盖不全（例如只有 ID `100` 和 `101`）。开启此功能后，LLM 会基于上下文生成具有针对性的测试值（Fuzzing Payloads）。
-- **效果**:
-    - 针对数字 ID，生成边界值（如 `0`, `-1`, `999999`）。
-    - 针对 UUID，生成格式正确但随机的新 UUID。
-    - 生成结果会自动存入数据库，参与后续的攻击排列组合。
-    ![alt text](image-4.png)
+# 用用户2的 Cookie 访问目标
+curl -x http://127.0.0.1:8080 \
+  -H "Cookie: session=hmt2_token" \
+  http://198.18.0.1:5888/api/users/me
+```
 
-#### C. 高危接口识别 (Identify High-Risk APIs)
-- **原理**: 并非所有接口都值得重点关注。LLM 会分析请求的方法、路径和参数，判断该接口是否涉及敏感操作（增删改、支付、隐私查询）。
-- **效果**:
-    - 被 AI 判定为 **High Risk** 的接口，在 **IDOR Attacks** 列表中会以 **红色字体** 高亮显示。
-    - 这有助于测试人员优先审查高危接口，避免漏测关键业务，同时在执行删除/修改操作前保持警惕。
+### 5. 提取参数
 
-#### D. 攻击结果分析 (Analyze Attack Results)
-- **原理**: 依靠状态码（如 200 vs 403）判断越权往往存在误报（如“伪 200”：状态码 200 但内容是 "Permission Denied"）。
-- **效果**:
-    - 开启此功能后，执行攻击（Execute Selected）时，插件会将 **原始请求/响应** 与 **攻击请求/响应** 打包发送给 LLM。
-    - LLM 会对比响应内容的语义差异，判断攻击是否成功。
-    - **结果展示**:
-        - **状态列**: 更新为 `VULNERABLE` (红), `SAFE` (绿), 或 `UNCERTAIN`。
-        - **Diff 面板**: 在右侧 Diff 标签页中，会直接显示 AI 的分析结论和推理过程（Reason），方便人工复核。
-        ```text
-        === LLM Analysis Result ===
-        Result: VULNERABLE
-        Reason: The attack response contains user profile data identical to the structure of the victim's data, indicating successful unauthorized access.
-        ```
+```bash
+curl -X POST http://127.0.0.1:8899/api/action/extract-params
+```
 
+### 6. 获取参数推荐
+
+```bash
+curl -X POST http://127.0.0.1:8899/api/recommend \
+  -H "Content-Type: application/json" \
+  -d '{"key": "user_id", "location": "Auto"}'
+```
+
+响应示例：
+```json
+{
+  "status": "ok",
+  "data": {
+    "recommendations": [
+      {"rank": 1, "key": "user_id", "value": "10086", "source_user": "User 2", "endpoint": "/api/users/10086", "score": 100}
+    ]
+  }
+}
+```
+
+### 7. 应用推荐值
+
+```bash
+curl -X POST http://127.0.0.1:8899/api/recommend/apply \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": 1, "key": "user_id", "value": "10086", "location": "Query"}'
+```
+
+### 8. 新增/更新 Header
+
+```bash
+curl -X POST http://127.0.0.1:8899/api/user/1/header \
+  -H "Content-Type: application/json" \
+  -d '{"key": "X-Domain-Id", "value": "12345"}'
+```
+
+### 9. 生成攻击
+
+```bash
+curl -X POST http://127.0.0.1:8899/api/action/generate-attacks \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+### 10. 执行单个攻击
+
+```bash
+curl -X POST http://127.0.0.1:8899/api/action/execute-attack \
+  -H "Content-Type: application/json" \
+  -d '{"attack_id": 1}'
+```
+
+### 11. 批量执行 GET 攻击
+
+```bash
+curl -X POST http://127.0.0.1:8899/api/action/batch-attack-get \
+  -H "Content-Type: application/json" \
+  -d '{"limit": 50}'
+```
+
+### 12. 查询攻击结果
+
+```bash
+# 查询所有漏洞
+curl "http://127.0.0.1:8899/api/attacks?status=VULNERABLE&limit=20"
+
+# 查询单条详情
+curl http://127.0.0.1:8899/api/attacks/1
+```
+
+### 13. 关闭 Autorize
+
+```bash
+curl -X POST http://127.0.0.1:8899/api/action/autorize \
+  -H "Content-Type: application/json" \
+  -d '{"on": false}'
+```
+
+---
+
+## 五、响应格式
+
+所有响应为统一 JSON 格式：
+
+```json
+{
+  "status": "ok",       // "ok" 或 "error"
+  "data": {},           // 数据（成功时）
+  "message": "..."      // 提示信息
+}
+```
+
+错误响应：
+```json
+{
+  "status": "error",
+  "message": "Missing 'attack_id' in body"
+}
+```
+
+---
+
+## 六、测试
+
+### 单元测试（不需要 Burp）
+
+```bash
+python tests/test_api.py
+# 24 tests, all passing
+```
+
+### API 可用性测试（需要 Burp 运行插件）
+
+```bash
+python tests/test_agent.py --api-only
+```
+
+### 端到端测试（需要 Burp + 测试环境）
+
+```bash
+python tests/test_agent.py
+```
+
+端到端测试自动完成：登录获取 Cookie → 配置用户标识 → 设置 Header → 开启 Autorize → 发送流量 → 提取参数 → 获取推荐 → 生成攻击 → 批量执行 → 查询结果。
+
+---
+
+## 七、注意事项
+
+1. **API Key 掩码**：`GET /api/config` 返回的 `api_key` 为掩码格式（如 `sk-t****5678`），写入时传完整 key。
+2. **GUI 双入口**：API 操作会实时同步到 GUI，用户也可在 GUI 上手动操作，两者共享同一配置。
+3. **无认证**：API 服务无认证，监听 0.0.0.0，请确保网络环境安全。
+4. **Jython 2.7**：插件代码为 Jython 2.7 语法，API 响应中字符串为 unicode（`u'wal'`）。
+5. **端口占用**：如果重启插件遇到 `Address already in use`，在 Burp 中 Unload 再 Load 插件。
