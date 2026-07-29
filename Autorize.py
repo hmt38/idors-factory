@@ -35,33 +35,40 @@ class BurpExtender(IBurpExtender, IHttpListener, IProxyListener, IExtensionState
         
         initiator.print_welcome_message()
 
-        # 同步初始化 DatabaseManager (确保流量到达时 db_manager 已就绪)
-        from db.database import DatabaseManager
-        self.db_manager = DatabaseManager()
-        self.db_manager.extender = self
-        print("DatabaseManager initialized successfully.")
+        # 标记 db_manager 已初始化 (None 表示尚未就绪, 后台线程会填充)
+        self.db_manager = None
+        self._db_ready = False
 
-        # 后台线程初始化 ConfigManager / Extractor / AttackEngine / HTTP server
+        # 后台线程初始化所有组件 (db_manager / ConfigManager / Extractor / AttackEngine / HTTP server)
         self.executor.submit(self.init_components)
 
         return
 
     def init_components(self):
-        """后台初始化 ConfigManager / Extractor / AttackEngine / HTTP server (db_manager 已在 registerExtenderCallbacks 中同步创建)."""
+        """后台初始化 DatabaseManager / ConfigManager / Extractor / AttackEngine / HTTP server."""
+        # 第一步: 创建 DatabaseManager (流量入库依赖此项)
         try:
-            # 初始化 ConfigManager (配置管理单例)
+            from db.database import DatabaseManager
+            self.db_manager = DatabaseManager()
+            self.db_manager.extender = self
+            self._db_ready = True
+            print("DatabaseManager initialized successfully.")
+        except Exception as e:
+            print("[Autorize] CRITICAL: Failed to initialize DatabaseManager: " + str(e))
+            import traceback
+            traceback.print_exc()
+            return  # db_manager 是基础, 失败则不继续
+
+        # 第二步: 初始化 ConfigManager / Extractor / AttackEngine / HTTP server
+        try:
             from api.config_manager import ConfigManager
             self.config_manager = ConfigManager(self.db_manager)
             self.config_manager.set_extender(self)
-
-            # 从 GUI 同步配置到 ConfigManager
             self.config_manager.sync_from_gui(self)
 
-            # Initialize Extractor
             from extractor.extractor import ParameterExtractor
             self.extractor = ParameterExtractor(self.db_manager)
 
-            # Initialize Attack Engine
             from attacker.attacker import AttackEngine
             self.attack_engine = AttackEngine(self.db_manager)
 
@@ -70,20 +77,19 @@ class BurpExtender(IBurpExtender, IHttpListener, IProxyListener, IExtensionState
                 self.run_auto_idor_cycle, 5, 5, TimeUnit.MINUTES
             )
             print("Auto IDOR scheduler initialized (disabled by default).")
-
-            # 启动 HTTP API Server (后台线程)
-            try:
-                from api.http_server import ApiService
-                self.api_service = ApiService(self)
-                self.api_service.start()
-            except Exception as e:
-                print("[Autorize] Failed to start HTTP API server: " + str(e))
-                self.api_service = None
-
         except Exception as e:
-            print("Failed to initialize components: " + str(e))
+            print("[Autorize] Failed to initialize Extractor/AttackEngine: " + str(e))
             import traceback
             traceback.print_exc()
+
+        # 第三步: 启动 HTTP API Server
+        try:
+            from api.http_server import ApiService
+            self.api_service = ApiService(self)
+            self.api_service.start()
+        except Exception as e:
+            print("[Autorize] Failed to start HTTP API server: " + str(e))
+            self.api_service = None
 
     def run_extraction_task(self):
         try:
