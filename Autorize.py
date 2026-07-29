@@ -35,18 +35,8 @@ class BurpExtender(IBurpExtender, IHttpListener, IProxyListener, IExtensionState
         
         initiator.print_welcome_message()
 
-        # 标记 db_manager 已初始化 (None 表示尚未就绪, 后台线程会填充)
-        self.db_manager = None
-        self._db_ready = False
-
-        # 后台线程初始化所有组件 (db_manager / ConfigManager / Extractor / AttackEngine / HTTP server)
-        self.executor.submit(self.init_components)
-
-        return
-
-    def init_components(self):
-        """后台初始化 DatabaseManager / ConfigManager / Extractor / AttackEngine / HTTP server."""
-        # 第一步: 创建 DatabaseManager (流量入库依赖此项)
+        # 同步初始化 DatabaseManager (确保流量到达时 db_manager 已就绪)
+        # 使用 try/except 避免异常导致后续初始化中断
         try:
             from db.database import DatabaseManager
             self.db_manager = DatabaseManager()
@@ -57,9 +47,24 @@ class BurpExtender(IBurpExtender, IHttpListener, IProxyListener, IExtensionState
             print("[Autorize] CRITICAL: Failed to initialize DatabaseManager: " + str(e))
             import traceback
             traceback.print_exc()
-            return  # db_manager 是基础, 失败则不继续
+            self.db_manager = None
+            self._db_ready = False
 
-        # 第二步: 初始化 ConfigManager / Extractor / AttackEngine / HTTP server
+        # 后台线程初始化 ConfigManager / Extractor / AttackEngine / HTTP server
+        import threading
+        t = threading.Thread(target=self.init_components)
+        t.daemon = True
+        t.start()
+
+        return
+
+    def init_components(self):
+        """后台初始化 ConfigManager / Extractor / AttackEngine / HTTP server (db_manager 已同步创建)."""
+        if not self._db_ready:
+            print("[init_components] db_manager not ready, skipping component init")
+            return
+
+        # 第一步: 初始化 ConfigManager / Extractor / AttackEngine
         try:
             from api.config_manager import ConfigManager
             self.config_manager = ConfigManager(self.db_manager)
@@ -82,7 +87,7 @@ class BurpExtender(IBurpExtender, IHttpListener, IProxyListener, IExtensionState
             import traceback
             traceback.print_exc()
 
-        # 第三步: 启动 HTTP API Server
+        # 第二步: 启动 HTTP API Server
         try:
             from api.http_server import ApiService
             self.api_service = ApiService(self)

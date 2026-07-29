@@ -256,56 +256,20 @@ class DatabaseManager:
                     else:
                         cursor.execute(query)
 
-                    # Some zxJDBC drivers (like sqlite-jdbc wrapper) might fail on fetchall
-                    try:
-                        results = cursor.fetchall()
-                        print(
-                            "[DB] fetchall() returned {} rows".format(
-                                len(results) if results else 0
-                            )
-                        )
-                        return results if results else []
-                    except Exception as e_fetchall:
-                        # "not implemented" 等错误走兜底 BLOB CAST 重试
-                        error_str_fetchall = str(e_fetchall).lower()
-                        if (
-                            "not implemented" not in error_str_fetchall
-                            and "java" not in error_str_fetchall
-                        ):
-                            # 真正的查询异常，交给外层 except 处理
-                            raise
-                        print(
-                            "[DB] fetchall() failed: "
-                            + str(e_fetchall)
-                            + ", trying iteration..."
-                        )
-                        # Fallback iteration
-                        results = []
+                    # zxJDBC + SQLite JDBC driver 不支持 fetchall(),
+                    # 直接用 fetchone() 逐行获取
+                    results = []
+                    while True:
                         try:
-                            row_count = 0
-                            while True:
-                                row = cursor.fetchone()
-                                if row is None:
-                                    break
-                                results.append(row)
-                                row_count += 1
-                            print("[DB] Iteration fetched {} rows".format(row_count))
-                            return results
-                        except Exception as e_iter:
-                            print("[DB] Iteration also failed: " + str(e_iter))
-                            # Last resort: try for loop
-                            try:
-                                for row in cursor:
-                                    results.append(row)
-                                print(
-                                    "[DB] For-loop fetched {} rows".format(
-                                        len(results)
-                                    )
-                                )
-                                return results
-                            except Exception as e_for:
-                                print("[DB] For-loop also failed: " + str(e_for))
-                                return results  # 返回已拿到的部分
+                            row = cursor.fetchone()
+                        except Exception as e_fetch:
+                            print("[DB] fetchone() failed: " + str(e_fetch))
+                            break
+                        if row is None:
+                            break
+                        results.append(row)
+                    print("[DB] fetchone() iteration returned {} rows".format(len(results)))
+                    return results if results else []
                 else:
                     # Standard sqlite3
                     if params:
