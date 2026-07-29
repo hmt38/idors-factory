@@ -34,19 +34,21 @@ class BurpExtender(IBurpExtender, IHttpListener, IProxyListener, IExtensionState
         initiator.init_ui() 
         
         initiator.print_welcome_message()
-        
-        # Initialize DatabaseManager in a background thread to prevent UI freezing
-        self.executor.submit(self.init_database)
-        
+
+        # 同步初始化 DatabaseManager (确保流量到达时 db_manager 已就绪)
+        from db.database import DatabaseManager
+        self.db_manager = DatabaseManager()
+        self.db_manager.extender = self
+        print("DatabaseManager initialized successfully.")
+
+        # 后台线程初始化 ConfigManager / Extractor / AttackEngine / HTTP server
+        self.executor.submit(self.init_components)
+
         return
 
-    def init_database(self):
+    def init_components(self):
+        """后台初始化 ConfigManager / Extractor / AttackEngine / HTTP server (db_manager 已在 registerExtenderCallbacks 中同步创建)."""
         try:
-            from db.database import DatabaseManager
-            self.db_manager = DatabaseManager()
-            self.db_manager.extender = self  # Link extender to db_manager
-            print("DatabaseManager initialized successfully.")
-
             # 初始化 ConfigManager (配置管理单例)
             from api.config_manager import ConfigManager
             self.config_manager = ConfigManager(self.db_manager)
@@ -58,13 +60,11 @@ class BurpExtender(IBurpExtender, IHttpListener, IProxyListener, IExtensionState
             # Initialize Extractor
             from extractor.extractor import ParameterExtractor
             self.extractor = ParameterExtractor(self.db_manager)
-            
+
             # Initialize Attack Engine
             from attacker.attacker import AttackEngine
             self.attack_engine = AttackEngine(self.db_manager)
-            
-            # Disable automatic scheduling for debugging purposes (manual trigger only)
-            # self.scheduler.scheduleWithFixedDelay(self.run_extraction_task, 10, 10, TimeUnit.SECONDS)
+
             print("Parameter Extractor and Attack Engine initialized (Manual Mode).")
             self.scheduler.scheduleWithFixedDelay(
                 self.run_auto_idor_cycle, 5, 5, TimeUnit.MINUTES
@@ -76,13 +76,12 @@ class BurpExtender(IBurpExtender, IHttpListener, IProxyListener, IExtensionState
                 from api.http_server import ApiService
                 self.api_service = ApiService(self)
                 self.api_service.start()
-                print("[Autorize] HTTP API server started on 127.0.0.1:8899")
             except Exception as e:
                 print("[Autorize] Failed to start HTTP API server: " + str(e))
                 self.api_service = None
 
         except Exception as e:
-            print("Failed to initialize DatabaseManager or Extractor: " + str(e))
+            print("Failed to initialize components: " + str(e))
             import traceback
             traceback.print_exc()
 

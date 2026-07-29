@@ -323,14 +323,9 @@ def identify_and_save_traffic(self, messageInfo):
                     query_params[p.getName()] = p.getValue()
             
             # Save to DB
-            if not hasattr(self, 'db_manager'):
-                # Try to get it from extender if initialized
-                if hasattr(self, 'db_manager'): 
-                     pass # already has it
-                else:
-                    # Initialize locally if needed (though Autorize.py should have done it)
-                    print("[IDOR] DatabaseManager not found in self, initializing...")
-                    self.db_manager = DatabaseManager()
+            if not hasattr(self, 'db_manager') or self.db_manager is None:
+                print("[IDOR] db_manager not ready, skipping save (will retry next traffic)")
+                return
 
             # Map "User 1" to "A", "User 2" to "B" for consistency with requirements if desired,
             # or just store "User 1", "User 2". Let's store "User 1", "User 2" for now as it's more flexible.
