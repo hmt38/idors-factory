@@ -11,6 +11,7 @@ if (sys.version_info[0] == 2):
 sys.path.append("..")
 
 from helpers.http import get_authorization_header_from_message, get_cookie_header_from_message, isStatusCodesReturned, makeMessage, makeRequest, getResponseBody, IHttpRequestResponseImplementation
+from helpers.traffic_identity import auto_detect_user_identifier as _auto_detect_user_identifier
 from gui.table import LogEntry, UpdateTableEDT
 from db.database import DatabaseManager
 from javax.swing import SwingUtilities
@@ -256,54 +257,58 @@ def identify_and_save_traffic(self, messageInfo):
         reqInfo = self._helpers.analyzeRequest(messageInfo)
         headers = list(reqInfo.getHeaders())
         headers_str = "\n".join(headers)
-        
+
         user_identifier = None
-        
-        # Iterate over all configured users in UserTab
-        if hasattr(self, 'userTab') and self.userTab:
+        matched_by_mapping = False
+
+        # Priority 1: ConfigManager (database, authoritative source)
+        # This works even when GUI tabs don't exist (API-only workflow).
+        config_manager = getattr(self, 'config_manager', None)
+        if config_manager:
+            try:
+                users = config_manager.get_users()
+                for user in users:
+                    ident_str = (user.get("identify_string") or "").strip()
+                    if ident_str and ident_str in headers_str:
+                        user_identifier = user.get("name", "User " + str(user.get("id")))
+                        matched_by_mapping = True
+                        break
+            except Exception as e:
+                print("[IDOR] ConfigManager lookup failed: " + str(e))
+
+        # Priority 2: GUI userTab (fallback for GUI-configured users)
+        if not user_identifier and hasattr(self, 'userTab') and self.userTab:
             for user_id, user_data in self.userTab.user_tabs.items():
-                # Check if this user has an identifier configured
                 if 'headers_instance' in user_data:
                     headers_inst = user_data['headers_instance']
                     if hasattr(headers_inst, 'userIdentifierString'):
                         ident_str = headers_inst.userIdentifierString.getText().strip()
                         if ident_str and ident_str in headers_str:
-                            # Match found!
-                            # In requirements we used 'A' and 'B', but here we have dynamic users.
-                            # Let's map User 1 -> A, User 2 -> B, etc. or just use the user_id/name.
-                            # For simplicity and compatibility with our requirements doc, let's try to map:
-                            # User 1 is usually the Attacker (User A)
-                            # User 2 is usually the Victim (User B)
-                            # But Autorize logic is: "High privileged user" (User A) runs in browser (original request),
-                            # and Autorize replays as "Low privileged user" (User B).
-                            # Wait, Autorize standard flow:
-                            # 1. Capture High Priv request (Cookie A)
-                            # 2. Replay with Low Priv session (Cookie B)
-                            #
-                            # Our new IDOR flow:
-                            # 1. Capture User A traffic (Cookie A) -> Save as User A
-                            # 2. Capture User B traffic (Cookie B) -> Save as User B
-                            # 
-                            # So we need to know if the CURRENT request being captured is from A or B.
-                            # The user configures "User Identifier" in the User Tab.
-                            # If I browse as User A, headers contain Cookie A.
-                            # If I browse as User B, headers contain Cookie B.
-                            
-                            user_identifier = str(user_data['user_name']) # e.g. "User 1"
+                            user_identifier = str(user_data['user_name'])
+                            matched_by_mapping = True
                             break
-        
+
+        # Priority 3: Auto-detect common auth headers when no mapping configured.
+        # 用户未配置 user-identify 映射时, 默认寻找 Cookie/X-Auth-Token/Authorization 等
+        # 常见 headers 作为用户标识, 并缓存流量入库, 后续可通过 refresh-traffic-identity 刷新.
+        if not user_identifier:
+            user_identifier = _auto_detect_user_identifier(headers_str)
+
         if user_identifier:
-            print("[IDOR] Found traffic for " + user_identifier)
+            if not matched_by_mapping:
+                print("[IDOR] Found traffic for " + user_identifier + " (auto-detected, cached for later refresh)")
+            else:
+                print("[IDOR] Found traffic for " + user_identifier)
             # Extract details
             method = reqInfo.getMethod()
             url = str(reqInfo.getUrl())
             host = reqInfo.getUrl().getHost()
             path = reqInfo.getUrl().getPath()
-            
+
             # Body
             reqBodyBytes = messageInfo.getRequest()[reqInfo.getBodyOffset():]
             body = self._helpers.bytesToString(reqBodyBytes)
-            
+
             # Response Data (New)
             response_headers = None
             response_body = None
@@ -311,7 +316,7 @@ def identify_and_save_traffic(self, messageInfo):
                 resInfo = self._helpers.analyzeResponse(messageInfo.getResponse())
                 res_headers_list = list(resInfo.getHeaders())
                 response_headers = json.dumps(res_headers_list)
-                
+
                 resBodyBytes = messageInfo.getResponse()[resInfo.getBodyOffset():]
                 response_body = self._helpers.bytesToString(resBodyBytes)
 
@@ -321,7 +326,7 @@ def identify_and_save_traffic(self, messageInfo):
             for p in parameters:
                 if p.getType() == 0: # PARAM_URL
                     query_params[p.getName()] = p.getValue()
-            
+
             # Save to DB
             if not hasattr(self, 'db_manager') or self.db_manager is None:
                 print("[IDOR] db_manager not ready, skipping save (will retry next traffic)")
@@ -329,18 +334,19 @@ def identify_and_save_traffic(self, messageInfo):
 
             # Map "User 1" to "A", "User 2" to "B" for consistency with requirements if desired,
             # or just store "User 1", "User 2". Let's store "User 1", "User 2" for now as it's more flexible.
-            
+
             save_result = self.db_manager.save_raw_request(
                 method, host, url, path, headers, query_params, body, user_identifier, response_headers, response_body
             )
-            
+
             if save_result:
                 print("[IDOR] Saved request for " + user_identifier + ": " + url + " (ID: " + str(save_result) + ")")
-            
+
     except Exception as e:
         print("[IDOR] Error saving traffic: " + str(e))
         import traceback
         traceback.print_exc()
+
 
 def checkAuthorizationAllUsers(self, messageInfo, checkUnauthorized=True):
     if not getattr(self, 'userTab', None) or not hasattr(self.userTab, 'user_tabs'):

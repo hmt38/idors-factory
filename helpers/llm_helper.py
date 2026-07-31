@@ -253,9 +253,8 @@ Example Output:
         if heuristic_result:
             return heuristic_result
 
-        prompt = self._construct_prompt(original_req, original_res, attack_req, attack_res)
-        
         try:
+            prompt = self._construct_prompt(original_req, original_res, attack_req, attack_res)
             response = self._call_llm(prompt)
             return self._parse_response(response)
         except Exception as e:
@@ -372,11 +371,11 @@ DECISION RULES:
 
 OUTPUT FORMAT:
 Return ONLY a JSON object:
-{
+{{
   "result": "VULNERABLE" | "SAFE" | "UNCERTAIN",
   "confidence": number between 0 and 1,
   "reason": "short explanation"
-}
+}}
 
 ORIGINAL REQUEST:
 {}
@@ -553,8 +552,11 @@ ATTACK RESPONSE:
         if isinstance(parsed_json, (dict, list)):
             try:
                 body_part = json.dumps(parsed_json, ensure_ascii=False, indent=2)
-            except TypeError:
-                body_part = json.dumps(parsed_json, indent=2)
+            except Exception:
+                try:
+                    body_part = json.dumps(parsed_json, indent=2)
+                except Exception:
+                    body_part = str(parsed_json)
 
         body_part = self._summarize_large_text(body_part, max(1000, total_limit - len(header_part)))
         combined = header_part + separator + body_part
@@ -674,3 +676,151 @@ ATTACK RESPONSE:
         except Exception as e:
             print("[LLM] Failed to parse LLM response: " + str(e))
             return {"result": "UNCERTAIN", "reason": "Failed to parse LLM output", "confidence": 0.2}
+
+    # ------------------------------------------------------------------
+    # Feature 1: AI 剪枝 - 对攻击队列中的 POC 进行价值评分
+    # ------------------------------------------------------------------
+    def score_attack_potential(self, payload_description, request_data_str, target_user):
+        """
+        对一个 POC 进行价值评分, 用于剪枝决策.
+        Returns: {"score": 0-100, "reason": "...", "should_prune": bool}
+        """
+        if not self.api_key or not self.base_url:
+            return {"score": 50, "reason": "LLM not configured", "should_prune": False}
+
+        prompt = (
+            "You are a Web Security Expert. Score the IDOR attack POC value.\n"
+            "Higher score means more likely to find a vulnerability.\n\n"
+            "POC Description: {}\n"
+            "Target User: {}\n"
+            "Request Data: {}\n\n"
+            "Scoring criteria:\n"
+            "- 90-100: Swapping a real user identifier parameter across users (high IDOR potential)\n"
+            "- 60-89:  Swapping numeric IDs that likely map to user-specific resources\n"
+            "- 30-59:  Swapping generic params (pagination, filters) unlikely to reveal IDOR\n"
+            "- 0-29:   Duplicate or nonsensical attacks (e.g., swapping to same value, non-existent resource)\n\n"
+            "Return ONLY a JSON object:\n"
+            '{{"score": <0-100>, "reason": "<short explanation>", "should_prune": <true if score<30>}}'
+        ).format(
+            self._truncate(payload_description or "N/A", 500),
+            str(target_user or "N/A"),
+            self._truncate(request_data_str or "N/A", 1000),
+        )
+
+        try:
+            response = self._call_llm(prompt)
+            content = self._extract_content(response)
+            result_obj = json.loads(content)
+            score = int(result_obj.get("score", 50))
+            score = max(0, min(100, score))
+            return {
+                "score": score,
+                "reason": result_obj.get("reason", "No reason"),
+                "should_prune": result_obj.get("should_prune", score < 30),
+            }
+        except Exception as e:
+            print("[LLM] Error scoring attack potential: " + str(e))
+            return {"score": 50, "reason": "Scoring failed: " + str(e), "should_prune": False}
+
+    # ------------------------------------------------------------------
+    # Feature 2: AI 越权验证 - 带完整上下文的深度验证
+    # ------------------------------------------------------------------
+    def verify_with_full_context(self, original_req, original_res, attack_req, attack_res, extra_context):
+        """
+        带完整上下文的深度 IDOR 验证. 越权 AI agent 可提供额外上下文.
+        Returns: {"result": "VULNERABLE|SAFE|UNCERTAIN", "reason": "...", "confidence": 0-1, "verified": bool}
+        """
+        if not self.api_key or not self.base_url:
+            return {"result": "UNCERTAIN", "reason": "LLM not configured", "confidence": 0.2, "verified": False}
+
+        # 先走启发式
+        heuristic_result = self._analyze_idor_with_heuristics(original_res, attack_res)
+        if heuristic_result:
+            heuristic_result["verified"] = True
+            heuristic_result["source"] = "heuristic"
+            return heuristic_result
+
+        original_req_prepared = self._prepare_http_message_for_prompt(original_req, 2500)
+        original_res_prepared = self._prepare_http_message_for_prompt(original_res, 5000)
+        attack_req_prepared = self._prepare_http_message_for_prompt(attack_req, 2500)
+        attack_res_prepared = self._prepare_http_message_for_prompt(attack_res, 5000)
+        context_str = self._truncate(str(extra_context or ""), 2000)
+
+        prompt = (
+            "You are an expert IDOR Verification Agent with full security context.\n"
+            "Analyze whether the ATTACK REQUEST successfully accessed another user's data.\n\n"
+            "EXTRA CONTEXT FROM SECURITY AGENT:\n{}\n\n"
+            "ORIGINAL REQUEST:\n{}\n\n"
+            "ORIGINAL RESPONSE:\n{}\n\n"
+            "ATTACK REQUEST:\n{}\n\n"
+            "ATTACK RESPONSE:\n{}\n\n"
+            "DECISION RULES:\n"
+            "1. VULNERABLE: Attack response returns real business data belonging to another user.\n"
+            "2. SAFE: Attack response shows authorization failure, denial, or non-existent resource.\n"
+            "3. UNCERTAIN: Evidence is insufficient or contradictory.\n\n"
+            "Return ONLY a JSON object:\n"
+            '{{"result": "VULNERABLE|SAFE|UNCERTAIN", "confidence": <0-1>, "reason": "<explanation>"}}'
+        ).format(context_str, original_req_prepared, original_res_prepared,
+                 attack_req_prepared, attack_res_prepared)
+
+        try:
+            response = self._call_llm(prompt)
+            result = self._parse_response(response)
+            result["verified"] = True
+            result["source"] = "ai_agent"
+            return result
+        except Exception as e:
+            print("[LLM] Error in AI verify with context: " + str(e))
+            return {"result": "UNCERTAIN", "reason": "AI verify failed: " + str(e),
+                    "confidence": 0.2, "verified": False, "source": "ai_agent"}
+
+    # ------------------------------------------------------------------
+    # Feature 3: AI POC 生成 - 建议参数修改
+    # ------------------------------------------------------------------
+    def generate_poc_modifications(self, request_data_str, existing_params, target_users):
+        """
+        让 LLM 基于原始请求和已有参数, 建议 IDOR 测试的参数修改方案.
+        Returns: list of {"param": "...", "original_value": "...", "new_value": "...",
+                          "location": "QUERY|PATH|BODY|HEADER", "reason": "..."}
+        """
+        if not self.api_key or not self.base_url:
+            return []
+
+        prompt = (
+            "You are a Web Security Expert specializing in IDOR testing.\n"
+            "Given an HTTP request and known parameters, suggest parameter modifications for IDOR testing.\n\n"
+            "Request Data: {}\n\n"
+            "Known Parameters: {}\n\n"
+            "Target Users (try to swap to these users' values): {}\n\n"
+            "Rules:\n"
+            "1. Focus on user-identifiable parameters (user_id, order_id, account_id, etc.)\n"
+            "2. Suggest 1-3 modifications, prioritizing cross-user value swaps\n"
+            "3. Include a non-existent value (e.g., 99999) as a control test\n"
+            "4. Each modification should target a different parameter\n\n"
+            "Return ONLY a JSON list:\n"
+            '[{{"param": "<name>", "original_value": "<old>", "new_value": "<new>", '
+            '"location": "QUERY|PATH|BODY|HEADER", "reason": "<why>"}}]'
+        ).format(
+            self._truncate(request_data_str or "N/A", 2000),
+            self._truncate(json.dumps(existing_params or []), 1000),
+            self._truncate(json.dumps(target_users or []), 500),
+        )
+
+        try:
+            response = self._call_llm(prompt)
+            content = self._extract_content(response)
+            modifications = json.loads(content)
+            if not isinstance(modifications, list):
+                modifications = [modifications] if isinstance(modifications, dict) else []
+            valid = []
+            for m in modifications:
+                if isinstance(m, dict) and "param" in m and "new_value" in m:
+                    m.setdefault("location", "QUERY")
+                    m.setdefault("original_value", "")
+                    m.setdefault("reason", "")
+                    valid.append(m)
+            print("[LLM] Generated {} POC modifications".format(len(valid)))
+            return valid
+        except Exception as e:
+            print("[LLM] Error generating POC modifications: " + str(e))
+            return []

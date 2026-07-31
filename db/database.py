@@ -46,43 +46,19 @@ class DatabaseManager:
                         if jar.endswith(".jar"):
                             jar_path = os.path.join(lib_dir, jar)
 
-                            # Method 1: sys.path.append (Standard Python)
+                            # Method 1: sys.path.append (Standard Python/Jython)
+                            # In Jython, adding a .jar to sys.path makes its classes importable.
                             if jar_path not in sys.path:
                                 sys.path.append(jar_path)
                                 print("Added to sys.path: " + jar_path)
 
-                            # Method 2: java.net.URLClassLoader (Java specific, forceful loading)
-                            try:
-                                from java.io import File
-                                from java.net import URL, URLClassLoader
-                                from java.lang import ClassLoader
-
-                                method = URLClassLoader.getDeclaredMethod(
-                                    "addURL", [URL]
-                                )
-                                method.setAccessible(True)
-                                method.invoke(
-                                    ClassLoader.getSystemClassLoader(),
-                                    [File(jar_path).toURI().toURL()],
-                                )
-                                print("Added to SystemClassLoader: " + jar_path)
-                            except Exception as e:
-                                print("Failed to add to SystemClassLoader: " + str(e))
-
-                # Explicitly load the driver class
+                # Try to preload the driver class (optional; zxJDBC.connect also loads it)
                 try:
                     from java.lang import Class
-
-                    # Force reload logic
-                    try:
-                        Class.forName("org.sqlite.JDBC")
-                    except:
-                        # If failed, try to load using the jar path explicitly via URLClassLoader if not system loader
-                        pass
-
+                    Class.forName("org.sqlite.JDBC")
                     print("Loaded org.sqlite.JDBC driver successfully")
-                except Exception as e:
-                    print("Failed to load org.sqlite.JDBC driver: " + str(e))
+                except:
+                    print("[DB] Driver pre-load skipped (will load on first connection)")
             except Exception as e:
                 print("[DB] WARN: jar loading failed: " + str(e))
 
@@ -205,8 +181,10 @@ class DatabaseManager:
 
             # List of known BLOB columns that need CAST conversion (only actual BLOB types)
             # headers and response_headers are TEXT, not BLOB
+            # 长列名优先, 避免 request_data 误匹配 executed_request_data
             blob_columns = [
-                "response_body",  # Check longer names first to avoid partial matches
+                "executed_request_data",
+                "response_body",
                 "response_data",
                 "request_data",
                 "body",
@@ -307,8 +285,14 @@ class DatabaseManager:
                         pass
                     continue
 
-                # zxJDBC "not implemented" 等错误：兜底 BLOB CAST 重试（保留原逻辑）
-                if "not implemented" in error_str or "java" in error_str:
+                # zxJDBC BLOB 相关错误：兜底 CAST 重试
+                if (
+                    "not implemented" in error_str
+                    or "java" in error_str
+                    or "blob" in error_str
+                    or "byte" in error_str
+                    or "stream" in error_str
+                ):
                     fallback_result = self._fetch_all_blob_fallback(
                         conn, query, params
                     )
@@ -360,9 +344,8 @@ class DatabaseManager:
             retry_query = query
             blob_columns = [
                 "executed_request_data",
-                "request_data",
-                "response_data",
                 "response_body",
+                "response_data",
                 "request_data",
                 "body",
             ]
@@ -532,7 +515,7 @@ class DatabaseManager:
                 # Check for new columns in attack_queue
                 try:
                     cursor.execute(
-                        "SELECT response_data, response_code, llm_verification_result, verified, executed_request_data FROM attack_queue LIMIT 1"
+                        "SELECT response_data, response_code, llm_verification_result, verified, executed_request_data, ai_verification_result, ai_verified FROM attack_queue LIMIT 1"
                     )
                 except:
                     # Columns might be missing
@@ -563,6 +546,18 @@ class DatabaseManager:
                     try:
                         cursor.execute(
                             "ALTER TABLE attack_queue ADD COLUMN executed_request_data BLOB"
+                        )
+                    except:
+                        pass
+                    try:
+                        cursor.execute(
+                            "ALTER TABLE attack_queue ADD COLUMN ai_verification_result TEXT"
+                        )
+                    except:
+                        pass
+                    try:
+                        cursor.execute(
+                            "ALTER TABLE attack_queue ADD COLUMN ai_verified BOOLEAN DEFAULT 0"
                         )
                     except:
                         pass

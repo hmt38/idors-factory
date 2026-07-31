@@ -69,6 +69,9 @@ class BurpExtender(IBurpExtender, IHttpListener, IProxyListener, IExtensionState
             from api.config_manager import ConfigManager
             self.config_manager = ConfigManager(self.db_manager)
             self.config_manager.set_extender(self)
+            # 先将 DB 中持久化的配置同步到 GUI/extender (config 是真相源)
+            # 再从 GUI 读取 (此时 GUI 已被刷新为 DB 值, sync_from_gui 基本是 no-op)
+            self.config_manager.sync_to_gui(self)
             self.config_manager.sync_from_gui(self)
 
             from extractor.extractor import ParameterExtractor
@@ -91,9 +94,13 @@ class BurpExtender(IBurpExtender, IHttpListener, IProxyListener, IExtensionState
         try:
             from api.http_server import ApiService
             self.api_service = ApiService(self)
-            self.api_service.start()
+            result = self.api_service.start()
+            if not result:
+                print("[Autorize] HTTP API server failed to start (check [API] logs above)")
         except Exception as e:
             print("[Autorize] Failed to start HTTP API server: " + str(e))
+            import traceback
+            traceback.print_exc()
             self.api_service = None
 
     def run_extraction_task(self):

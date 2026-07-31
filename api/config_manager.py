@@ -51,14 +51,16 @@ except ImportError:
 # ----------------------------------------------------------------------------
 DEFAULTS = {
     "blacklist_params": "limit,offset",
-    "enable_llm": "false",
+    # 默认开启 LLM, 但只启用 "Analyze Attack Results" (剪枝 + AI 越权验证).
+    # extract_params / generate_values / identify_risk 默认关闭, 避免无谓的 LLM 调用.
+    "enable_llm": "true",
     "llm_base_url": "https://api.openai.com/v1",
     "llm_api_key": "",
     "llm_model": "gpt-3.5-turbo",
     "llm_disable_ssl_verification": "false",
-    "llm_extract_params": "true",
-    "llm_generate_values": "true",
-    "llm_identify_risk": "true",
+    "llm_extract_params": "false",
+    "llm_generate_values": "false",
+    "llm_identify_risk": "false",
     "llm_analyze_result": "true",
     "auto_idor_enabled": "false",
     "autorize_intercept": "0",
@@ -490,9 +492,53 @@ class ConfigManager(object):
             self._do_sync_users_to_gui(ext)
 
     def _do_sync_users_to_gui(self, ext):
-        """在 EDT 上同步用户配置到 GUI."""
-        # TODO: 阶段1.4 实现 GUI 用户面板的双向同步
-        pass
+        """在 EDT 上同步用户配置到 GUI.
+
+        从数据库读取用户列表, 更新对应 GUI tab 的 userIdentifierString 和 replaceString.
+        如果 GUI 中没有对应用户 ID 的 tab, 跳过 (用户需要先在 GUI 上 Add User).
+        """
+        if not hasattr(ext, "userTab") or not ext.userTab:
+            return
+
+        user_tabs = ext.userTab.user_tabs
+        if not user_tabs:
+            return
+
+        # 从数据库读取最新用户配置
+        users = self.get_users()
+        if not users:
+            return
+
+        # 构建 user_id -> user_data 的映射 (GUI tabs)
+        # GUI 的 user_tabs key 是自增的 user_count, value 里有 user_id 字段
+        gui_by_uid = {}
+        for tab_key, tab_data in user_tabs.items():
+            uid = tab_data.get("user_id")
+            if uid is not None:
+                gui_by_uid[uid] = tab_data
+
+        for db_user in users:
+            uid = db_user["id"]
+            tab_data = gui_by_uid.get(uid)
+            if not tab_data:
+                # GUI 中没有这个用户的 tab, 跳过
+                continue
+
+            headers_inst = tab_data.get("headers_instance")
+            if not headers_inst:
+                continue
+
+            # 更新 identify_string 文本框
+            ident_str = db_user.get("identify_string", "")
+            if hasattr(headers_inst, "userIdentifierString"):
+                current = headers_inst.userIdentifierString.getText()
+                if current != ident_str:
+                    headers_inst.userIdentifierString.setText(ident_str)
+
+            # 更新 headers_text (replaceString)
+            headers_text = db_user.get("headers_text", "")
+            if hasattr(headers_inst, "replaceString") and headers_text:
+                headers_inst.replaceString.setText(headers_text)
 
     # ------------------------------------------------------------------
     # 公开: 从 GUI 读取配置到 ConfigManager (GUI -> ConfigManager)
@@ -535,6 +581,10 @@ class ConfigManager(object):
         for config_key, gui_attr in bool_mapping.items():
             if hasattr(ext, gui_attr):
                 self.set_bool(config_key, ext.__getattribute__(gui_attr).isSelected())
+
+        # autorize 开关 (JToggleButton, 存为 int)
+        if hasattr(ext, "startButton"):
+            self.set_int("autorize_intercept", 1 if ext.startButton.isSelected() else 0)
 
         print("[ConfigManager] Synced configuration from GUI")
 
@@ -595,8 +645,9 @@ class ConfigManager(object):
             if hasattr(ext, gui_attr):
                 ext.__getattribute__(gui_attr).setSelected(self.get_bool(config_key))
 
-        # autorize 开关
+        # autorize 开关 (同时设置 ext.intercept, handle_message 检查此属性)
         intercept = self.get_int("autorize_intercept", 0)
+        ext.intercept = intercept
         if hasattr(ext, "startButton"):
             if intercept == 1:
                 ext.startButton.setText("Autorize is on")

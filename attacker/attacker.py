@@ -869,9 +869,11 @@ class AttackEngine:
         )
 
     def _param_lookup_key(self, name, location):
-        if str(location).upper() == "HEADER":
-            return "HEADER:" + str(name).strip().lower()
-        return str(location) + ":" + str(name)
+        # parameter_pool 的 location 字段可能被 LLM 提取覆盖为 "LLM_llm" 等，
+        # 与 _extract_params_from_request 返回的 "QUERY"/"BODY_JSON"/"PATH" 不一致。
+        # 由于 parameter_pool UNIQUE 键为 (api_signature, param_name, user_identifier)，
+        # 每个参数名每用户只有一条记录，故仅用参数名做 key 即可正确匹配。
+        return str(name).strip().lower()
 
     def _get_header_fuzz_key_map(self, user_identifier):
         key_map = {}
@@ -1238,19 +1240,31 @@ class AttackEngine:
         from java.util import ArrayList
         from helpers.llm_helper import LLMHelper
         from java.net import URL
+        import traceback as _tb
 
         # 1. Fetch attack data
-        sql = (
-            "SELECT request_data, original_request_id, target_user FROM attack_queue WHERE id = "
-            + str(attack_id)
-        )
-        rows = self.db_manager.fetch_all(sql)
-        if not rows:
-            print("[Attacker] Attack ID {} not found.".format(attack_id))
-            return None
+        try:
+            sql = (
+                "SELECT request_data, original_request_id, target_user FROM attack_queue WHERE id = "
+                + str(attack_id)
+            )
+            rows = self.db_manager.fetch_all(sql)
+            if not rows:
+                print("[Attacker] Attack ID {} not found.".format(attack_id))
+                return None
 
-        request_data_json, original_req_id, target_user = rows[0]
-        request_data = json.loads(request_data_json)
+            request_data_json, original_req_id, target_user = rows[0]
+            # Handle Java byte arrays from zxJDBC BLOB columns
+            if not isinstance(request_data_json, (str, unicode)):
+                try:
+                    request_data_json = helpers.bytesToString(request_data_json)
+                except Exception:
+                    request_data_json = str(request_data_json)
+            request_data = json.loads(request_data_json)
+        except Exception as e:
+            print("[Attacker] Step 1 (fetch attack data) failed: " + str(e))
+            _tb.print_exc()
+            raise
 
         if apply_hidden_param_on_execute:
             hidden_param_entry = self._build_hidden_param_entry(hidden_param_config, target_user)
@@ -1332,54 +1346,91 @@ class AttackEngine:
         if 200 <= response_code < 300:
             # Only check if successful
             if llm_config and llm_config.get("enabled", False):
-                llm = LLMHelper(
-                    llm_config["base_url"],
-                    llm_config["api_key"],
-                    llm_config["model"],
-                    verify_ssl=llm_config.get("verify_ssl", True),
-                )
-
-                # Fetch original request string
-                orig_req_sql = (
-                    "SELECT method, url, headers, body, response_headers, response_body FROM raw_requests WHERE id = "
-                    + str(original_req_id)
-                )
-                orig_rows = self.db_manager.fetch_all(orig_req_sql)
-                orig_req_str = ""
-                orig_res_str = "Not Available"
-                if orig_rows:
-                    m, u, h_json, b, res_h_json, res_b = orig_rows[0]
-                    orig_req_str = "{} {}\n{}\n\n{}".format(
-                        m, u, "\n".join(json.loads(h_json)), b if b else ""
+                try:
+                    llm = LLMHelper(
+                        llm_config["base_url"],
+                        llm_config["api_key"],
+                        llm_config["model"],
+                        verify_ssl=llm_config.get("verify_ssl", True),
                     )
-                    if res_h_json:
+
+                    # Fetch original request string
+                    orig_req_sql = (
+                        "SELECT method, url, headers, body, response_headers, response_body FROM raw_requests WHERE id = "
+                        + str(original_req_id)
+                    )
+                    orig_rows = self.db_manager.fetch_all(orig_req_sql)
+                    orig_req_str = ""
+                    orig_res_str = "Not Available"
+                    if orig_rows:
+                        m, u, h_json, b, res_h_json, res_b = orig_rows[0]
+                        # Safely handle headers JSON (may be Java String/byte[])
                         try:
-                            response_headers = "\n".join(json.loads(res_h_json))
-                            response_body = (
-                                helpers.bytesToString(res_b) if res_b else ""
-                            )
-                            orig_res_str = "{}\n\n{}".format(
-                                response_headers, response_body
-                            )
-                        except:
-                            orig_res_str = helpers.bytesToString(res_b) if res_b else ""
+                            if not isinstance(h_json, (str, unicode)):
+                                h_json = helpers.bytesToString(h_json) if h_json else "[]"
+                            h_list = json.loads(h_json) if h_json else []
+                            if not isinstance(h_list, list):
+                                h_list = [str(h_list)]
+                            h_str = "\n".join(h_list)
+                        except Exception as e_h:
+                            print("[Attacker] Error parsing original headers: " + str(e_h))
+                            h_str = str(h_json) if h_json else ""
+                        # Safely handle body (may be Java byte[])
+                        try:
+                            if b is not None and not isinstance(b, (str, unicode)):
+                                b_str = helpers.bytesToString(b) if b else ""
+                            else:
+                                b_str = b if b else ""
+                        except Exception:
+                            b_str = ""
+                        orig_req_str = "{} {}\n{}\n\n{}".format(
+                            m, u, h_str, b_str
+                        )
+                        if res_h_json:
+                            try:
+                                if not isinstance(res_h_json, (str, unicode)):
+                                    res_h_json = helpers.bytesToString(res_h_json) if res_h_json else "[]"
+                                rh_list = json.loads(res_h_json) if res_h_json else []
+                                if not isinstance(rh_list, list):
+                                    rh_list = [str(rh_list)]
+                                response_headers = "\n".join(rh_list)
+                                response_body = (
+                                    helpers.bytesToString(res_b) if res_b else ""
+                                )
+                                orig_res_str = "{}\n\n{}".format(
+                                    response_headers, response_body
+                                )
+                            except Exception as e_rh:
+                                print("[Attacker] Error parsing orig response headers: " + str(e_rh))
+                                orig_res_str = helpers.bytesToString(res_b) if res_b else ""
 
-                print("[Attacker] Calling LLM for verification...")
-                llm_res = llm.analyze_idor_vulnerability(
-                    orig_req_str,
-                    orig_res_str,
-                    attack_request_text,
-                    attack_response_text,
-                )
-                llm_result_str = json.dumps(llm_res)
+                    print("[Attacker] Calling LLM for verification...")
+                    llm_res = llm.analyze_idor_vulnerability(
+                        orig_req_str,
+                        orig_res_str,
+                        attack_request_text,
+                        attack_response_text,
+                    )
+                    print("[Attacker] LLM returned type: {}, value: {}".format(type(llm_res), str(llm_res)[:200]))
+                    llm_result_str = json.dumps(llm_res)
 
-                # Update status based on LLM
-                if llm_res["result"] == "VULNERABLE":
-                    status = "VULNERABLE"
-                elif llm_res["result"] == "SAFE":
-                    status = "SAFE"
-                else:
+                    # Update status based on LLM
+                    if isinstance(llm_res, dict) and "result" in llm_res:
+                        if llm_res["result"] == "VULNERABLE":
+                            status = "VULNERABLE"
+                        elif llm_res["result"] == "SAFE":
+                            status = "SAFE"
+                        else:
+                            status = "UNCERTAIN"
+                    else:
+                        print("[Attacker] WARNING: llm_res is not a dict or missing 'result' key: " + str(llm_res)[:200])
+                        status = "UNCERTAIN"
+                        llm_result_str = json.dumps({"result": "UNCERTAIN", "reason": "LLM returned unexpected type", "confidence": 0.3})
+                except Exception as e_llm:
+                    print("[Attacker] LLM verification failed: " + str(e_llm))
+                    _tb.print_exc()
                     status = "UNCERTAIN"
+                    llm_result_str = json.dumps({"result": "UNCERTAIN", "reason": "LLM verification error: " + str(e_llm), "confidence": 0.3})
             else:
                 status = "CHECKING_SKIPPED"  # No LLM
         else:
@@ -1404,3 +1455,431 @@ class AttackEngine:
         )
 
         return {"id": attack_id, "status": status, "code": response_code}
+
+    # ------------------------------------------------------------------
+    # Feature 1: AI 剪枝 - 批量评估并删除低价值 POC
+    # ------------------------------------------------------------------
+    def prune_attacks(self, llm_config=None, limit=50, score_threshold=30):
+        """
+        对 PENDING 状态的攻击进行 LLM 评分, 删除低于阈值的.
+        使用参数化 DELETE, 不影响自增序列和索引.
+        """
+        from helpers.llm_helper import LLMHelper
+
+        # 获取 PENDING 攻击列表
+        sql = (
+            "SELECT a.id, a.payload_description, a.request_data, a.target_user "
+            "FROM attack_queue a "
+            "WHERE a.status = 'PENDING' "
+            "ORDER BY a.vulnerability_score DESC LIMIT ?"
+        )
+        rows = self.db_manager.fetch_all(sql, [int(limit)])
+        if not rows:
+            return {"total": 0, "pruned": 0, "remaining": 0, "details": []}
+
+        details = []
+        pruned_ids = []
+
+        for row in rows:
+            attack_id, payload_desc, req_data, target_user = row
+            # 处理 byte[]
+            if req_data and not isinstance(req_data, (str, unicode)):
+                try:
+                    req_data_str = str(req_data)
+                except Exception:
+                    req_data_str = ""
+            else:
+                req_data_str = req_data or ""
+
+            score = 50
+            reason = ""
+            should_prune = False
+
+            if llm_config and llm_config.get("enabled", False):
+                llm = LLMHelper(
+                    llm_config["base_url"],
+                    llm_config["api_key"],
+                    llm_config["model"],
+                    verify_ssl=llm_config.get("verify_ssl", True),
+                )
+                result = llm.score_attack_potential(payload_desc, req_data_str, target_user)
+                score = result.get("score", 50)
+                reason = result.get("reason", "")
+                should_prune = result.get("should_prune", score < score_threshold)
+            else:
+                # 无 LLM 时用简单启发式: 检查 payload_description 中是否包含 "->99999" 等无意义值
+                if payload_desc and "99999" in str(payload_desc):
+                    should_prune = True
+                    reason = "Contains non-existent test value"
+                    score = 20
+
+            details.append({
+                "attack_id": attack_id,
+                "score": score,
+                "reason": reason,
+                "pruned": should_prune,
+                "payload": payload_desc,
+            })
+
+            if should_prune:
+                pruned_ids.append(attack_id)
+
+        # 批量删除低分 POC (使用参数化查询)
+        for aid in pruned_ids:
+            self.db_manager.execute_query(
+                "DELETE FROM attack_queue WHERE id = ?",
+                [aid],
+                commit=True,
+            )
+
+        remaining = len(rows) - len(pruned_ids)
+        print("[Attacker] Pruned {} of {} PENDING attacks (remaining: {})".format(
+            len(pruned_ids), len(rows), remaining))
+
+        return {
+            "total": len(rows),
+            "pruned": len(pruned_ids),
+            "remaining": remaining,
+            "pruned_ids": pruned_ids,
+            "details": details,
+        }
+
+    # ------------------------------------------------------------------
+    # Feature 2: AI 越权验证 - 带完整上下文的深度验证
+    # ------------------------------------------------------------------
+    def ai_verify_attack(self, attack_id, llm_config=None, callbacks=None, helpers=None, extra_context=None):
+        """
+        AI 验证单个攻击结果, 带完整上下文.
+        结果写入 ai_verification_result 和 ai_verified 字段, 优先级高于 LLM 自动验证.
+        """
+        from helpers.llm_helper import LLMHelper
+        import json as _json
+
+        # 1. 获取攻击数据和原始请求数据
+        sql = (
+            "SELECT a.id, a.executed_request_data, a.response_data, a.response_code, a.status, "
+            "a.llm_verification_result, a.payload_description, "
+            "r.method, r.url, r.headers, r.body, r.response_headers, r.response_body "
+            "FROM attack_queue a "
+            "JOIN raw_requests r ON a.original_request_id = r.id "
+            "WHERE a.id = ?"
+        )
+        rows = self.db_manager.fetch_all(sql, [attack_id])
+        if not rows:
+            return {"error": "Attack not found"}
+
+        row = rows[0]
+        (_, exec_req_data, resp_data, resp_code, status, llm_result, payload_desc,
+         method, url, orig_headers, orig_body, orig_resp_headers, orig_resp_body) = row
+
+        # 2. 构建请求/响应文本
+        def to_str(val):
+            if val is None:
+                return ""
+            if isinstance(val, (str, unicode)):
+                return val
+            if helpers:
+                try:
+                    return helpers.bytesToString(val)
+                except Exception:
+                    pass
+            try:
+                return str(val)
+            except Exception:
+                return ""
+
+        attack_req_text = to_str(exec_req_data) or ""
+        attack_res_text = to_str(resp_data) or ""
+
+        # 原始请求
+        orig_req_str = ""
+        try:
+            h_list = _json.loads(orig_headers) if orig_headers else []
+            if not isinstance(h_list, list):
+                h_list = [str(h_list)]
+            h_str = "\n".join(h_list)
+        except Exception:
+            h_str = str(orig_headers or "")
+        orig_req_str = "{} {}\n{}\n\n{}".format(
+            method or "GET", url or "", h_str, to_str(orig_body))
+
+        # 原始响应
+        orig_res_str = "Not Available"
+        try:
+            rh_list = _json.loads(orig_resp_headers) if orig_resp_headers else []
+            if not isinstance(rh_list, list):
+                rh_list = [str(rh_list)]
+            rh_str = "\n".join(rh_list)
+            orig_res_str = "{}\n\n{}".format(rh_str, to_str(orig_resp_body))
+        except Exception:
+            orig_res_str = to_str(orig_resp_body) or "Not Available"
+
+        # 3. 调用 LLM 验证
+        if llm_config and llm_config.get("enabled", False):
+            llm = LLMHelper(
+                llm_config["base_url"],
+                llm_config["api_key"],
+                llm_config["model"],
+                verify_ssl=llm_config.get("verify_ssl", True),
+            )
+            result = llm.verify_with_full_context(
+                orig_req_str, orig_res_str,
+                attack_req_text, attack_res_text,
+                extra_context or {},
+            )
+        else:
+            return {"error": "LLM not enabled"}
+
+        # 4. 回写数据库
+        ai_result_str = _json.dumps(result)
+        # AI 验证结果优先: 如果 AI 判定为 VULNERABLE, 更新 status
+        new_status = status
+        if result.get("result") == "VULNERABLE":
+            new_status = "VULNERABLE"
+        elif result.get("result") == "SAFE" and status == "PENDING":
+            new_status = "SAFE"
+
+        self.db_manager.execute_query(
+            "UPDATE attack_queue SET ai_verification_result = ?, ai_verified = 1, status = ? WHERE id = ?",
+            [ai_result_str, new_status, attack_id],
+            commit=True,
+        )
+
+        print("[Attacker] AI verified attack {}: {} (confidence: {})".format(
+            attack_id, result.get("result"), result.get("confidence")))
+
+        return {
+            "attack_id": attack_id,
+            "ai_result": result,
+            "new_status": new_status,
+            "payload": payload_desc,
+        }
+
+    # ------------------------------------------------------------------
+    # Feature 3: AI POC 生成 - 基于 LLM 建议创建攻击条目
+    # ------------------------------------------------------------------
+    def ai_create_poc(self, request_id, modifications=None, llm_config=None, target_user=None):
+        """
+        基于 AI 建议的参数修改, 创建新的攻击条目.
+        modifications: list of {"param", "new_value", "location", "reason"}
+        如果 modifications 为空, 则调用 LLM 自动生成.
+        """
+        from helpers.llm_helper import LLMHelper
+        import json as _json
+
+        # 1. 获取原始请求数据
+        sql = (
+            "SELECT id, method, host, url, path, headers, query_params, body, user_identifier "
+            "FROM raw_requests WHERE id = ?"
+        )
+        rows = self.db_manager.fetch_all(sql, [request_id])
+        if not rows:
+            return {"error": "Request not found"}
+
+        req = rows[0]
+        (req_id, method, host, url, path, headers_json,
+         query_params_json, body, user_identifier) = req
+
+        # 构建 request_data (与 _create_attack_entry_for_combination 格式一致)
+        try:
+            headers_list = _json.loads(headers_json) if headers_json else []
+        except Exception:
+            headers_list = [str(headers_json)] if headers_json else []
+        try:
+            query_params = _json.loads(query_params_json) if query_params_json else {}
+        except Exception:
+            query_params = {}
+
+        request_data = {
+            "headers": list(headers_list),
+            "method": method or "GET",
+            "body": body if body else "",
+            "path": path or "",
+            "query_params": query_params,
+            "host": host or "",
+        }
+
+        # 2. 如果没有提供 modifications, 调用 LLM 生成
+        if not modifications and llm_config and llm_config.get("enabled", False):
+            llm = LLMHelper(
+                llm_config["base_url"],
+                llm_config["api_key"],
+                llm_config["model"],
+                verify_ssl=llm_config.get("verify_ssl", True),
+            )
+            # 获取已知的参数池数据
+            existing_params = []
+            try:
+                pool_rows = self.db_manager.fetch_all(
+                    "SELECT param_name, param_value, location, user_identifier "
+                    "FROM parameter_pool WHERE api_signature = "
+                    "(SELECT api_signature FROM raw_requests WHERE id = ?) LIMIT 20",
+                    [request_id],
+                )
+                if pool_rows:
+                    existing_params = [
+                        {"name": r[0], "value": r[1], "location": r[2], "user": r[3]}
+                        for r in pool_rows
+                    ]
+            except Exception:
+                pass
+
+            # 获取所有用户标识
+            target_users = []
+            try:
+                user_rows = self.db_manager.fetch_all(
+                    "SELECT DISTINCT user_identifier FROM parameter_pool "
+                    "WHERE user_identifier IS NOT NULL LIMIT 10"
+                )
+                if user_rows:
+                    target_users = [r[0] for r in user_rows]
+            except Exception:
+                pass
+
+            modifications = llm.generate_poc_modifications(
+                _json.dumps(request_data), existing_params, target_users
+            )
+
+        if not modifications:
+            return {"error": "No modifications provided or generated", "generated": 0}
+
+        # 3. 为每个 modification 创建攻击条目
+        created_ids = []
+        for mod in modifications:
+            param_name = mod.get("param", "")
+            new_value = mod.get("new_value", "")
+            location = mod.get("location", "QUERY").upper()
+            reason = mod.get("reason", "")
+
+            if not param_name or not new_value:
+                continue
+
+            # 克隆并修改 request_data
+            mod_data = _json.loads(_json.dumps(request_data))  # deep copy
+
+            if location == "QUERY":
+                old_val = mod_data.get("query_params", {}).get(param_name, "")
+                mod_data["query_params"][param_name] = new_value
+                # 更新请求行中的查询参数
+                if mod_data.get("headers"):
+                    req_line = mod_data["headers"][0]
+                    if "?" in req_line:
+                        base, qs = req_line.split("?", 1)
+                        pairs = qs.split("&")
+                        new_pairs = []
+                        for pair in pairs:
+                            if "=" in pair:
+                                k, v = pair.split("=", 1)
+                                if k == param_name:
+                                    new_pairs.append("{}={}".format(k, new_value))
+                                else:
+                                    new_pairs.append(pair)
+                            else:
+                                if pair == param_name:
+                                    new_pairs.append("{}={}".format(param_name, new_value))
+                                else:
+                                    new_pairs.append(pair)
+                        mod_data["headers"][0] = "{}?{}".format(base, "&".join(new_pairs))
+                    else:
+                        mod_data["headers"][0] = "{}?{}={}".format(
+                            mod_data["headers"][0].split(" ")[0] if " " in mod_data["headers"][0] else mod_data["headers"][0],
+                            param_name, new_value)
+
+            elif location == "PATH":
+                # 替换 path 中的参数值
+                old_val = mod_data.get("path", "")
+                # 简单的值替换: 在 path 中找到旧值并替换
+                # 这里需要原始参数值来定位
+                old_val = mod.get("original_value", "")
+                if old_val and old_val in mod_data["path"]:
+                    mod_data["path"] = mod_data["path"].replace(old_val, new_value)
+                    # 更新请求行
+                    if mod_data.get("headers"):
+                        parts = mod_data["headers"][0].split(" ")
+                        if len(parts) >= 2:
+                            parts[1] = mod_data["path"]
+                            mod_data["headers"][0] = " ".join(parts)
+
+            elif location == "BODY":
+                old_val = ""
+                body_str = mod_data.get("body", "")
+                if isinstance(body_str, (str, unicode)):
+                    try:
+                        body_obj = _json.loads(body_str)
+                        if isinstance(body_obj, dict) and param_name in body_obj:
+                            old_val = body_obj[param_name]
+                            body_obj[param_name] = new_value
+                            mod_data["body"] = _json.dumps(body_obj)
+                    except Exception:
+                        # 非 JSON body, 尝试 key=value 替换
+                        if param_name + "=" in body_str:
+                            import re as _re
+                            old_val = ""
+                            mod_data["body"] = _re.sub(
+                                r"{}=[^&]*".format(_re.escape(param_name)),
+                                "{}={}".format(param_name, new_value),
+                                body_str,
+                            )
+
+            elif location == "HEADER":
+                old_val = ""
+                if mod_data.get("headers"):
+                    for i, h in enumerate(mod_data["headers"]):
+                        if h.startswith(param_name + ":"):
+                            old_val = h.split(":", 1)[1].strip()
+                            mod_data["headers"][i] = "{}: {}".format(param_name, new_value)
+                            break
+
+            # 构造描述
+            desc = "[AI] Swap {} ({}): {}->{}".format(
+                location, param_name,
+                old_val if old_val else "?", new_value)
+            if reason:
+                desc += " | {}".format(reason[:100])
+
+            # 入队
+            request_data_json_str = _json.dumps(mod_data).replace("'", "''")
+            desc_str = desc.replace("'", "''")
+            # 获取 risk_score
+            risk_score = 40  # 默认
+            try:
+                score_rows = self.db_manager.fetch_all(
+                    "SELECT risk_score FROM parameter_pool "
+                    "WHERE param_name = ? AND location = ? LIMIT 1",
+                    [param_name, location],
+                )
+                if score_rows and score_rows[0][0] is not None:
+                    risk_score = score_rows[0][0]
+            except Exception:
+                pass
+
+            insert_sql = (
+                "INSERT INTO attack_queue "
+                "(original_request_id, target_user, payload_description, request_data, status, vulnerability_score) "
+                "VALUES ({}, '{}', '{}', '{}', 'PENDING', {})"
+            ).format(
+                request_id,
+                (target_user or user_identifier or "AI-Generated").replace("'", "''"),
+                desc_str,
+                request_data_json_str,
+                risk_score,
+            )
+
+            try:
+                self.db_manager.execute_query(insert_sql)
+                # 获取插入的 ID (不能用 last_insert_rowid(), 因为是不同连接)
+                id_rows = self.db_manager.fetch_all(
+                    "SELECT max(id) as id FROM attack_queue WHERE original_request_id = ?",
+                    [request_id],
+                )
+                if id_rows and id_rows[0][0]:
+                    created_ids.append(id_rows[0][0])
+                print("[Attacker] AI POC created: " + desc)
+            except Exception as e:
+                print("[Attacker] Error creating AI POC: " + str(e))
+
+        return {
+            "generated": len(created_ids),
+            "attack_ids": created_ids,
+            "modifications": modifications,
+        }
